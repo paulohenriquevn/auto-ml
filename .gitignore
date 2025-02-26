@@ -6,6 +6,7 @@ venv
 **.idea**
 **.pytest_cache**
 **.mypy_cache**
-**.mypy_cache**
-**.mypy_cache**
-**.mypy_cache**
+**.csv
+**.log
+**.json
+**logs**
