@@ -9,6 +9,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, Union, List
 
 # Importações internas
+from utils.preprocessing import PreProcessing
 from config import LOGGING_CONFIG
 from explorer.transformation_tree import TransformationTree
 from explorer.heuristic_search import HeuristicSearch
@@ -47,6 +48,12 @@ class AutoFeatureEngineering:
         self.meta_learner = MetaLearner()
         self.transformation_predictor = TransformationPredictor(self.meta_learner)
         
+        # Adicionar componente PreData
+        self.predata = PreProcessing(
+            max_analysis_time=self.config.get('predata_max_analysis_time', 5.0),
+            max_rows_analysis=self.config.get('predata_max_rows_analysis', 10000)
+        )
+        
         # Handlers para diferentes tipos de datasets
         self.dataset_handlers = {
             'tabular_classification': TabularClassificationHandler(),
@@ -68,12 +75,78 @@ class AutoFeatureEngineering:
                 logging.StreamHandler()
             ]
         )
+        
+    def analyze_data(
+        self, 
+        data: pd.DataFrame, 
+        target: Union[str, pd.Series], 
+        dataset_type: str,
+        include_visualizations: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Analisa o dataset e retorna métricas e recomendações.
+        
+        Args:
+            data: DataFrame com os dados a serem analisados
+            target: Nome da coluna alvo ou Series com valores alvo
+            dataset_type: Tipo de dataset
+            include_visualizations: Se deve incluir visualizações no relatório
+            
+        Returns:
+            Dicionário com resultados da análise e recomendações
+        """
+        self.logger.info(f"Iniciando análise prévia de dados para {dataset_type}")
+        
+        # Executar análise com o módulo PreData
+        analysis_results = self.predata.analyze_dataset(data, target, dataset_type)
+        
+        # Gerar relatório completo
+        report = self.predata.get_report(include_visualizations=include_visualizations)
+        
+        self.logger.info("Análise prévia de dados concluída")
+        
+        return {
+            'analysis_results': analysis_results,
+            'report': report
+        }
+        
+        
+    def preprocess_data(
+        self, 
+        data: pd.DataFrame, 
+        selected_recommendations: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """
+        Aplica as transformações recomendadas aos dados.
+        
+        Args:
+            data: DataFrame com os dados originais
+            selected_recommendations: Lista de IDs das recomendações a aplicar
+            
+        Returns:
+            DataFrame com as transformações aplicadas
+        """
+        self.logger.info("Iniciando pré-processamento de dados")
+        
+        # Aplicar transformações recomendadas
+        transformed_data = self.predata.apply_recommended_transformations(
+            data, 
+            selected_recommendations
+        )
+        
+        self.logger.info("Pré-processamento de dados concluído")
+        
+        return transformed_data
+    
     
     def fit_transform(
         self, 
         data: pd.DataFrame, 
         target: Union[str, pd.Series], 
         dataset_type: str,
+        run_predata: bool = False,
+        apply_recommendations: bool = False,
+        predata_recommendations: Optional[List[str]] = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -90,6 +163,16 @@ class AutoFeatureEngineering:
             DataFrame com as features transformadas
         """
         self.logger.info(f"Iniciando processo de engenharia de features para {dataset_type}")
+        
+        # Executar PreData se solicitado
+        if run_predata:
+            self.logger.info("Executando análise prévia de dados")
+            self.predata.analyze_dataset(data, target, dataset_type)
+            
+            # Aplicar recomendações se solicitado
+            if apply_recommendations:
+                self.logger.info("Aplicando recomendações de pré-processamento")
+                data = self.predata.apply_recommended_transformations(data, predata_recommendations)
         
         # 1. Selecionar o handler adequado para o tipo de dataset
         if dataset_type not in self.dataset_handlers:

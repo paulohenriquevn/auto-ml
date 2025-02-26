@@ -10,3 +10,4 @@ venv
 **.log
 **.json
 **logs**
+**.zip
