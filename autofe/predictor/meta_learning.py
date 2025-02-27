@@ -201,7 +201,11 @@ class MetaLearner:
                 
                 # Adicionar eficácia como alvo
                 y_meta.append(transformation['performance_gain'])
-        
+                
+        if len(X_meta) == 0 or len(y_meta) == 0:
+            self.logger.warning("Dados insuficientes para treinar o modelo de meta-aprendizado")
+            return
+                
         # Converter para DataFrame e Series
         X_meta_df = pd.DataFrame(X_meta)
         y_meta_series = pd.Series(y_meta)

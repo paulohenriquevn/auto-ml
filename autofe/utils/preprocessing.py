@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import matplotlib.pyplot as plt
 import io
 import base64
+import seaborn as sns
 
 logger = logging.getLogger(__name__)
 
