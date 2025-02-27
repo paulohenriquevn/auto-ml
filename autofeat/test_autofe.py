@@ -48,27 +48,95 @@ class TestAutoFE:
         """
         Executa todos os testes disponíveis.
         """
-        try:
-            self.test_classification()
-        except Exception as e:
-            logger.error(f"Teste de CLASSIFICAÇÃO falhou: {e}")
-            
-        try:
-            self.test_regression()
-        except Exception as e:
-            logger.error(f"Teste de REGRESSÃO falhou: {e}")
-            
-        try:
-            self.test_time_series()
-        except Exception as e:
-            logger.error(f"Teste de SÉRIES TEMPORAIS falhou: {e}")
-            
-        try:
-            self.test_text()
-        except Exception as e:
-            logger.error(f"Teste de TEXTO falhou: {e}")
-            
+        test_methods = [
+            self.test_classification,
+            self.test_regression,
+            self.test_time_series,
+            self.test_text,
+            self.test_kaggle_titanic
+        ]
+
+        for test_method in test_methods:
+            try:
+                test_method()
+            except Exception as e:
+                logger.error(f"Teste {test_method.__name__} falhou: {e}")
+
         logger.info("TODOS OS TESTES CONCLUÍDOS")
+    
+    
+    def test_kaggle_titanic(self):
+        """
+        Testa o sistema em um problema de classificação usando um dataset sintético inspirado no Titanic.
+        
+        Objetivos do Teste:
+        1. Validar processamento de dados com características complexas
+        2. Testar robustez do AutoFE em cenário próximo ao mundo real
+        
+        Desafios Simulados:
+        - Valores ausentes em diferentes tipos de colunas
+        - Variáveis categóricas com múltiplas categorias
+        - Variáveis texto (nomes)
+        - Necessidade de engenharia de features (ex: FamilySize)
+        
+        Características do Dataset Sintético:
+        - Total de amostras: 1000
+        - Variável alvo: Survived (0 ou 1)
+        - Features: Pclass, Sex, Age, SibSp, Parch, Fare, Embarked, Cabin, Name
+        
+        Pontos de Atenção Durante o Teste:
+        - Verificar tratamento de valores ausentes
+        - Avaliar criação de novas features
+        - Observar transformações em variáveis categóricas
+        - Analisar o score final do dataset
+        """
+        logger.info("=== Testando problema de CLASSIFICAÇÃO com dataset Titanic ===")
+        
+        # Cria um dataset sintético simulando o Titanic
+        np.random.seed(42)
+        
+        # Gera dados sintéticos seguindo a estrutura do Titanic
+        num_samples = 1000
+        
+        # Simulação de colunas do Titanic
+        data = {
+            'Survived': np.random.randint(0, 2, num_samples),  # Variável alvo
+            'Pclass': np.random.choice([1, 2, 3], num_samples),  # Classe da passagem
+            'Sex': np.random.choice(['male', 'female'], num_samples),  # Gênero
+            'Age': np.random.normal(30, 15, num_samples),  # Idade
+            'SibSp': np.random.randint(0, 6, num_samples),  # Número de irmãos/cônjuges a bordo
+            'Parch': np.random.randint(0, 4, num_samples),  # Número de pais/filhos a bordo
+            'Fare': np.random.exponential(30, num_samples),  # Tarifa
+            'Embarked': np.random.choice(['S', 'C', 'Q'], num_samples),  # Porto de embarque
+            
+            # Adiciona algumas colunas com valores ausentes para simular desafios reais
+            'Cabin': [f'{np.random.choice(["A", "B", "C", "D", "E"])}' + 
+                      f'{np.random.randint(1, 100)}' if np.random.random() > 0.3 else np.nan 
+                      for _ in range(num_samples)],
+            
+            # Simulação de nome com sobrenome da família
+            'Name': [f'Mr. {np.random.choice(["Smith", "Johnson", "Williams", "Brown", "Jones"])} '
+                     f'{np.random.choice(["Jr.", "Sr.", ""])}' 
+                     for _ in range(num_samples)]
+        }
+        
+        # Cria o DataFrame
+        df = pd.DataFrame(data)
+        
+        # Introduz alguns valores ausentes em colunas numéricas
+        df.loc[np.random.choice(df.index, num_samples // 10, replace=False), 'Age'] = np.nan
+        df.loc[np.random.choice(df.index, num_samples // 10, replace=False), 'Fare'] = np.nan
+        
+        # Adiciona complexidade com feature de família
+        df['FamilySize'] = df['SibSp'] + df['Parch'] + 1
+        
+        # Define parâmetros do problema
+        target_column = 'Survived'
+        problem_type = ProblemType.CLASSIFICATION
+        
+        # Executa o pipeline completo
+        self._test_pipeline(df, target_column, problem_type, "TITANIC KAGGLE")
+        
     
     def test_classification(self):
         """
