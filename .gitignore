@@ -11,3 +11,5 @@ venv
 **.json
 **logs**
 **.zip
+**output**
+**.joblib
