@@ -436,154 +436,154 @@ def main():
             "pirocheto/phishing-url",
             "wwydmanski/blog-feedback",
             "RUCAIBox/Data-to-text-Generation",
-            "YuRiVeRTi/V1Q"
+            "YuRiVeRTi/V1Q",
+            "dijihax/Dataset"
         ]
         
         print("Datasets disponíveis para teste:")
-        for i, name in enumerate(available_datasets, 1):
-            print(f"{i}. {name}")
-        
-        # Configurar o dataset a ser usado (pode ser alterado conforme necessário)
-        dataset_name = available_datasets[18] # "titanic"  # Dataset padrão
-        print(f"\nUsando dataset: {dataset_name}")
-        
-        # Criar pasta de output
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Carregar o dataset
-        df = load_and_prepare_dataset(dataset_name)
-        
-        # Explorar o dataset
-        df = explore_dataset(df)
-        
-        # Visualizar o dataset
-        visualize_dataset(df, output_dir=output_dir)
-        
-        # Determinar coluna alvo com base no dataset
-        target_col = None
-        if dataset_name.lower() in ["iris", "wine", "breast_cancer"]:
-            target_col = "target"
-        elif dataset_name.lower() == "titanic":
-            # No titanic do Hugging Face, a coluna pode ter nome diferente
-            if "survived" in df.columns:
-                target_col = "survived"
-            elif "Survived" in df.columns:
-                target_col = "Survived"
-        
-        if target_col:
-            print(f"Coluna alvo identificada: '{target_col}'")
-        else:
-            print("Nenhuma coluna alvo identificada automaticamente")
-        
-        # Pré-processar os dados
-        X_processed, y, preprocessor = preprocess_data(df, target_col)
-        
-        if X_processed is not None:
-            # Analisar os dados pré-processados e salvar em arquivo
-            dataset_processed = analyze_preprocessed_data(X_processed, y, output_dir=output_dir)
+        for i, dataset_name in enumerate(available_datasets, 1):
+            print(f"{i}. {dataset_name}")
             
-            # Salvar também o dataset original para referência
-            original_csv_path = f"{output_dir}/original_dataset.csv"
-            df.to_csv(original_csv_path, index=False)
-            print(f"Dataset original salvo em {original_csv_path}")
+            # Configurar o dataset a ser usado (pode ser alterado conforme necessário)
+            print(f"\nUsando dataset: {dataset_name}")
             
-            # Salvar metadados do dataset processado
-            metadata = {
-                "dataset_name": dataset_name,
-                "original_shape": df.shape,
-                "processed_shape": X_processed.shape,
-                "target_column": target_col,
-                "preprocessing_config": preprocessor.config if preprocessor else {},
-                "column_types": {k: list(v) for k, v in preprocessor.column_types.items()} if preprocessor else {},
-                "transformation_date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+            # Criar pasta de output
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
             
-            # Salvar metadados em formato JSON
-            try:
-                with open(f"{output_dir}/dataset_metadata.json", "w") as f:
-                    json.dump(metadata, f, indent=2, default=str)
-                print(f"Metadados do dataset salvos em {output_dir}/dataset_metadata.json")
-            except Exception as e:
-                print(f"Erro ao salvar metadados: {str(e)}")
+            # Carregar o dataset
+            df = load_and_prepare_dataset(dataset_name)
             
-            print("\n=== RESUMO DO PRÉ-PROCESSAMENTO ===")
-            print(f"Dataset: {dataset_name}")
-            print(f"Registros originais: {df.shape[0]}")
-            print(f"Features originais: {df.shape[1] - (1 if target_col else 0)}")
-            print(f"Features após pré-processamento: {X_processed.shape[1]}")
+            # Explorar o dataset
+            df = explore_dataset(df)
             
-            # Mostrar algumas transformações realizadas
-            if preprocessor:
-                print("\nTransformações realizadas:")
-                print(f"- Tratamento de valores ausentes usando '{preprocessor.config['missing_values_strategy']}'")
-                print(f"- Tratamento de outliers usando '{preprocessor.config['outlier_strategy']}'")
-                print(f"- Codificação de variáveis categóricas usando '{preprocessor.config['categorical_strategy']}'")
-                print(f"- Normalização de variáveis numéricas: {'Sim' if preprocessor.config['normalization'] else 'Não'}")
+            # Visualizar o dataset
+            visualize_dataset(df, output_dir=output_dir)
+            
+            # Determinar coluna alvo com base no dataset
+            target_col = None
+            if dataset_name.lower() in ["iris", "wine", "breast_cancer"]:
+                target_col = "target"
+            elif dataset_name.lower() == "titanic":
+                # No titanic do Hugging Face, a coluna pode ter nome diferente
+                if "survived" in df.columns:
+                    target_col = "survived"
+                elif "Survived" in df.columns:
+                    target_col = "Survived"
+            
+            if target_col:
+                print(f"Coluna alvo identificada: '{target_col}'")
+            else:
+                print("Nenhuma coluna alvo identificada automaticamente")
+            
+            # Pré-processar os dados
+            X_processed, y, preprocessor = preprocess_data(df, target_col)
+            
+            if X_processed is not None:
+                # Analisar os dados pré-processados e salvar em arquivo
+                dataset_processed = analyze_preprocessed_data(X_processed, y, output_dir=output_dir)
                 
-                # Mostrar tamanho do preprocessador salvo
-                if os.path.exists("dataset_preprocessor.joblib"):
-                    size_mb = os.path.getsize("dataset_preprocessor.joblib") / (1024 * 1024)
-                    print(f"Tamanho do preprocessador salvo: {size_mb:.2f} MB")
-            
-            # Gerar um relatório HTML básico
-            try:
-                html_report = f"""
-                <html>
-                <head>
-                    <title>Relatório de Pré-processamento - {dataset_name}</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                        h1, h2 {{ color: #2c3e50; }}
-                        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
-                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                        th {{ background-color: #f2f2f2; }}
-                        .summary {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; }}
-                        img {{ max-width: 100%; height: auto; margin: 10px 0; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>Relatório de Pré-processamento - {dataset_name}</h1>
-                    <div class="summary">
-                        <h2>Resumo</h2>
-                        <p>Dataset: {dataset_name}</p>
-                        <p>Registros: {df.shape[0]}</p>
-                        <p>Features originais: {df.shape[1] - (1 if target_col else 0)}</p>
-                        <p>Features após pré-processamento: {X_processed.shape[1]}</p>
-                        <p>Data de processamento: {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-                    </div>
-                    
-                    <h2>Configurações de Pré-processamento</h2>
-                    <ul>
-                        <li>Tratamento de valores ausentes: {preprocessor.config['missing_values_strategy']}</li>
-                        <li>Tratamento de outliers: {preprocessor.config['outlier_strategy']}</li>
-                        <li>Codificação de variáveis categóricas: {preprocessor.config['categorical_strategy']}</li>
-                        <li>Normalização: {'Sim' if preprocessor.config['normalization'] else 'Não'}</li>
-                    </ul>
-                    
-                    <h2>Visualizações</h2>
-                    <p>Distribuição das Features Processadas:</p>
-                    <img src="processed_features_distribution.png" alt="Distribuição das Features">
-                    
-                    <h2>Links para Arquivos</h2>
-                    <ul>
-                        <li><a href="original_dataset.csv">Dataset Original (CSV)</a></li>
-                        <li><a href="processed_dataset.csv">Dataset Processado (CSV)</a></li>
-                        <li><a href="dataset_metadata.json">Metadados do Processamento (JSON)</a></li>
-                    </ul>
-                </body>
-                </html>
-                """
+                # Salvar também o dataset original para referência
+                original_csv_path = f"{output_dir}/original_dataset.csv"
+                df.to_csv(original_csv_path, index=False)
+                print(f"Dataset original salvo em {original_csv_path}")
                 
-                with open(f"{output_dir}/preprocessing_report.html", "w") as f:
-                    f.write(html_report)
-                print(f"Relatório HTML gerado em {output_dir}/preprocessing_report.html")
-            except Exception as e:
-                print(f"Erro ao gerar relatório HTML: {str(e)}")
-        
-        print("\nExemplo concluído com sucesso!")
-        print("Resultado do pré-processamento disponível na pasta 'output/'")
-        print("Para usar outro dataset, altere a variável 'dataset_name' na função main()")
+                # Salvar metadados do dataset processado
+                metadata = {
+                    "dataset_name": dataset_name,
+                    "original_shape": df.shape,
+                    "processed_shape": X_processed.shape,
+                    "target_column": target_col,
+                    "preprocessing_config": preprocessor.config if preprocessor else {},
+                    "column_types": {k: list(v) for k, v in preprocessor.column_types.items()} if preprocessor else {},
+                    "transformation_date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
+                # Salvar metadados em formato JSON
+                try:
+                    with open(f"{output_dir}/dataset_metadata.json", "w") as f:
+                        json.dump(metadata, f, indent=2, default=str)
+                    print(f"Metadados do dataset salvos em {output_dir}/dataset_metadata.json")
+                except Exception as e:
+                    print(f"Erro ao salvar metadados: {str(e)}")
+                
+                print("\n=== RESUMO DO PRÉ-PROCESSAMENTO ===")
+                print(f"Dataset: {dataset_name}")
+                print(f"Registros originais: {df.shape[0]}")
+                print(f"Features originais: {df.shape[1] - (1 if target_col else 0)}")
+                print(f"Features após pré-processamento: {X_processed.shape[1]}")
+                
+                # Mostrar algumas transformações realizadas
+                if preprocessor:
+                    print("\nTransformações realizadas:")
+                    print(f"- Tratamento de valores ausentes usando '{preprocessor.config['missing_values_strategy']}'")
+                    print(f"- Tratamento de outliers usando '{preprocessor.config['outlier_strategy']}'")
+                    print(f"- Codificação de variáveis categóricas usando '{preprocessor.config['categorical_strategy']}'")
+                    print(f"- Normalização de variáveis numéricas: {'Sim' if preprocessor.config['normalization'] else 'Não'}")
+                    
+                    # Mostrar tamanho do preprocessador salvo
+                    if os.path.exists("dataset_preprocessor.joblib"):
+                        size_mb = os.path.getsize("dataset_preprocessor.joblib") / (1024 * 1024)
+                        print(f"Tamanho do preprocessador salvo: {size_mb:.2f} MB")
+                
+                # Gerar um relatório HTML básico
+                try:
+                    html_report = f"""
+                    <html>
+                    <head>
+                        <title>Relatório de Pré-processamento - {dataset_name}</title>
+                        <style>
+                            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                            h1, h2 {{ color: #2c3e50; }}
+                            table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+                            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                            th {{ background-color: #f2f2f2; }}
+                            .summary {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; }}
+                            img {{ max-width: 100%; height: auto; margin: 10px 0; }}
+                        </style>
+                    </head>
+                    <body>
+                        <h1>Relatório de Pré-processamento - {dataset_name}</h1>
+                        <div class="summary">
+                            <h2>Resumo</h2>
+                            <p>Dataset: {dataset_name}</p>
+                            <p>Registros: {df.shape[0]}</p>
+                            <p>Features originais: {df.shape[1] - (1 if target_col else 0)}</p>
+                            <p>Features após pré-processamento: {X_processed.shape[1]}</p>
+                            <p>Data de processamento: {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+                        </div>
+                        
+                        <h2>Configurações de Pré-processamento</h2>
+                        <ul>
+                            <li>Tratamento de valores ausentes: {preprocessor.config['missing_values_strategy']}</li>
+                            <li>Tratamento de outliers: {preprocessor.config['outlier_strategy']}</li>
+                            <li>Codificação de variáveis categóricas: {preprocessor.config['categorical_strategy']}</li>
+                            <li>Normalização: {'Sim' if preprocessor.config['normalization'] else 'Não'}</li>
+                        </ul>
+                        
+                        <h2>Visualizações</h2>
+                        <p>Distribuição das Features Processadas:</p>
+                        <img src="processed_features_distribution.png" alt="Distribuição das Features">
+                        
+                        <h2>Links para Arquivos</h2>
+                        <ul>
+                            <li><a href="original_dataset.csv">Dataset Original (CSV)</a></li>
+                            <li><a href="processed_dataset.csv">Dataset Processado (CSV)</a></li>
+                            <li><a href="dataset_metadata.json">Metadados do Processamento (JSON)</a></li>
+                        </ul>
+                    </body>
+                    </html>
+                    """
+                    
+                    with open(f"{output_dir}/preprocessing_report.html", "w") as f:
+                        f.write(html_report)
+                    print(f"Relatório HTML gerado em {output_dir}/preprocessing_report.html")
+                except Exception as e:
+                    print(f"Erro ao gerar relatório HTML: {str(e)}")
+            
+            print("\nExemplo concluído com sucesso!")
+            print("Resultado do pré-processamento disponível na pasta 'output/'")
+            print("Para usar outro dataset, altere a variável 'dataset_name' na função main()")
         
     except Exception as e:
         print(f"\nErro durante a execução: {str(e)}")

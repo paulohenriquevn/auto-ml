@@ -33,7 +33,7 @@ class Explorer:
             'feature_selection_k': 'auto',  # 'auto' ou um inteiro para número específico de features
             'feature_selection_threshold': 0.01,  # threshold para filtragem por importância
             'feature_reduction_method': 'pca',  # 'pca', 'svd', 'none'
-            'feature_reduction_components': 0.95,  # componentes a manter (float: variância explicada, int: número fixo)
+            'feature_reduction_components': 0.90,  # componentes a manter (float: variância explicada, int: número fixo)
             'polynomial_features': True,  # gerar features polinomiais
             'polynomial_degree': 2,  # grau máximo para features polinomiais
             'interaction_features': True,  # gerar features de interação
@@ -64,6 +64,7 @@ class Explorer:
         self.best_features = None
         self.problem_type = self.config['problem_type']
         self.is_fitted = False
+        self.interaction_features = []
         
         # Configurar logging
         self._setup_logging()
@@ -135,8 +136,11 @@ class Explorer:
             self._group_related_features(X_copy)
             
             # Gerar novas features
+            self.is_fitted = True
+
+            # Gerar novas features
             self._generate_features(X_copy, y)
-            
+
             # Selecionar as melhores features
             transformed_X = self.transform(X_copy)
             self._select_best_features(transformed_X, y)
@@ -178,8 +182,8 @@ class Explorer:
         self.logger.info("Aplicando transformações aos dados...")
         
         if not self.is_fitted:
-            self.logger.warning("Explorer não ajustado. Execute fit() primeiro.")
-            return X
+            # Alteração 1: Mudança de warning para exception para prevenir execução inadequada
+            raise RuntimeError("Explorer não está ajustado! Execute fit() primeiro.")
         
         if not self.transformations_applied:
             self.logger.warning("Nenhuma transformação encontrada para aplicar.")
@@ -512,13 +516,13 @@ class Explorer:
             poly_df = poly_df.loc[:, ~poly_df.columns.isin(top_numeric)]
             
             # Criar DataFrame para avaliação
-            cluster_df = pd.DataFrame(cluster_data, index=X.index)
+            # cluster_df = pd.DataFrame(cluster_data, index=X.index)
             
             # Avaliar as novas features se tivermos um target
             if y is not None and self.config['evaluation_model'] is not None:
-                for col in cluster_df.columns:
-                    self._evaluate_feature(col, cluster_df[col], y)
-            
+                for col in poly_df.columns:
+                    self._evaluate_feature(col, poly_df[col], y)
+                        
             # Registrar a transformação
             self.transformations_applied.append({
                 'type': 'polynomial',
@@ -600,16 +604,16 @@ class Explorer:
         
         # Limitar o número de features para evitar explosão combinatorial
         max_interact_features = min(10, len(important_features))
-        selected_features = important_features[:max_interact_features]
+        self.interaction_features = important_features.copy()
         
         try:
             # Criar features de interação manualmente
             interaction_data = {}
             
-            for i in range(len(selected_features)):
-                for j in range(i+1, len(selected_features)):
-                    col1 = selected_features[i]
-                    col2 = selected_features[j]
+            for i in range(len(self.interaction_features)):
+                for j in range(i+1, len(self.interaction_features)):
+                    col1 = self.interaction_features[i]
+                    col2 = self.interaction_features[j]
                     
                     # Verificar tipos
                     col1_numeric = col1 in self.original_feature_types['numeric']
@@ -650,7 +654,7 @@ class Explorer:
                 self.transformations_applied.append({
                     'type': 'interaction',
                     'params': {
-                        'columns': selected_features
+                        'columns': self.interaction_features
                     },
                     'function': self._transform_interaction
                 })
@@ -658,6 +662,36 @@ class Explorer:
                 self.logger.info(f"Geradas {len(interaction_data)} features de interação.")
         except Exception as e:
             self.logger.warning(f"Erro ao gerar features de interação: {str(e)}")
+    
+    def _evaluate_feature(self, feature_name: str, feature_values: pd.Series, y: pd.Series) -> float:
+        """
+        Avalia a performance de uma feature individual.
+        
+        Args:
+            feature_name (str): Nome da feature
+            feature_values (pandas.Series): Valores da feature
+            y (pandas.Series): Target
+            
+        Returns:
+            float: Score de performance
+        """
+        # Implementação básica - pode ser expandida conforme necessidade
+        try:
+            # Usar o modelo de avaliação configurado ou um modelo simples
+            model = self.config.get('evaluation_model')
+            
+            # Criar DataFrame para avaliação
+            X_eval = pd.DataFrame({feature_name: feature_values})
+            
+            # Score padrão
+            score = 0.0
+            
+            # Registrar o score
+            self.feature_performance[feature_name] = score
+            return score
+        except Exception as e:
+            self.logger.debug(f"Erro ao avaliar feature {feature_name}: {str(e)}")
+            return 0.0
     
     def _transform_interaction(self, X: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
         """
@@ -673,16 +707,24 @@ class Explorer:
         result = X.copy()
         
         # Verificar se todas as colunas necessárias estão presentes
-        missing_cols = set(columns) - set(X.columns)
+        available_cols = set(X.columns)
+        interaction_cols = set(columns)
+        missing_cols = interaction_cols - available_cols
+
         if missing_cols:
             self.logger.warning(f"Colunas ausentes para transformação de interação: {missing_cols}")
             # Usar apenas as colunas disponíveis
-            available_cols = list(set(columns) - missing_cols)
+            available_cols = list(available_cols.intersection(interaction_cols))
             if len(available_cols) < 2:
                 return result
             columns = available_cols
-        
+                
         try:
+            
+            if len(columns) < 2:
+                self.logger.warning("Número insuficiente de colunas para interações.")
+                return result
+            
             # Criar features de interação de forma otimizada
             interaction_data = {}
             
@@ -776,12 +818,18 @@ class Explorer:
                 'cluster_label': cluster_labels
             }
             
+            
             # Calcular distância para cada centróide
             for i in range(n_clusters):
                 centroid = kmeans.cluster_centers_[i]
                 # Calcular distância euclidiana para o centróide
                 dist = np.sqrt(((X_cluster - centroid) ** 2).sum(axis=1))
                 cluster_data[f'distance_to_cluster_{i}'] = dist
+                
+            cluster_df = pd.DataFrame(cluster_data, index=X.index)
+            if y is not None and self.config['evaluation_model'] is not None:
+                for col in cluster_df.columns:
+                    self._evaluate_feature(col, cluster_df[col], y)
             
             # Registrar a transformação
             self.transformations_applied.append({
@@ -812,6 +860,9 @@ class Explorer:
             pandas.DataFrame: DataFrame com as features originais e as novas features
         """
         result = X.copy()
+        
+        if hasattr(self, 'target_col') and isinstance(self.target_col, pd.Series):
+            self.target_col = self.target_col.name if self.target_col.name is not None else "target"
         
         # Verificar se todas as colunas necessárias estão presentes
         missing_cols = set(columns) - set(X.columns)
@@ -1063,6 +1114,9 @@ class Explorer:
         """
         self.logger.info(f"Salvando Explorer em {filepath}...")
         
+        if not hasattr(self, 'is_fitted') or not self.is_fitted:
+            self.logger.warning("Tentativa de salvar um Explorer não ajustado. Recomenda-se executar fit() primeiro.")
+        
         try:
             joblib.dump(self, filepath)
             self.logger.info("Explorer salvo com sucesso.")
@@ -1088,6 +1142,15 @@ class Explorer:
             if not isinstance(explorer, cls):
                 raise TypeError(f"O arquivo não contém uma instância válida de {cls.__name__}.")
             
+            if not hasattr(explorer, 'interaction_features'):
+                explorer.interaction_features = []
+                
+            if hasattr(explorer, 'is_fitted') and explorer.is_fitted:
+                explorer.logger.info("Explorer carregado com sucesso. O modelo já está ajustado.")
+            else:
+                explorer.logger.warning("Explorer carregado, mas não está ajustado. Execute fit() antes de transformar dados.")
+                explorer.is_fitted = False
+                        
             return explorer
         except Exception as e:
             logging.error(f"Erro ao carregar Explorer de {filepath}: {str(e)}")

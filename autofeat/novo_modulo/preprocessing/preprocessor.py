@@ -1,5 +1,5 @@
 """
-AutoFE - Módulo PreProcessor
+AutoFE - Módulo PreProcessor Aprimorado
 
 Este módulo é responsável pela limpeza e preparação inicial dos dados.
 Segue o princípio de ser modular e executável de forma independente.
@@ -7,14 +7,16 @@ Segue o princípio de ser modular e executável de forma independente.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 import pickle
 import os
 import joblib
+import logging
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from scipy import stats
 
 class PreProcessor:
     """
@@ -22,9 +24,9 @@ class PreProcessor:
     
     Este módulo implementa as seguintes funcionalidades:
     - Detecção e tratamento de valores ausentes
-    - Remoção ou tratamento de outliers
+    - Remoção ou tratamento de outliers (clipping, remoção ou winsorization)
     - Codificação de variáveis categóricas
-    - Normalização de variáveis numéricas
+    - Normalização de variáveis numéricas (com opção para detecção automática)
     - Transformação de tipos de dados
     """
     
@@ -36,18 +38,25 @@ class PreProcessor:
             config (Dict, opcional): Dicionário com configurações para o pré-processamento.
                 Pode incluir:
                 - missing_values_strategy: 'mean', 'median', 'most_frequent', 'constant'
-                - outlier_strategy: 'remove', 'clip', 'impute'
+                - outlier_method: 'clip', 'remove', 'winsorize'
+                - outlier_threshold: z-score para detecção de outliers (para método 'clip' e 'remove')
+                - winsorize_percentiles: tupla (lower, upper) com percentis para winsorization
                 - categorical_strategy: 'onehot', 'label', 'ordinal'
-                - normalization: True/False
+                - normalization: True/False ou 'auto'
+                - max_categories: número máximo de categorias para onehot encoding
+                - model_type: tipo de modelo a ser usado (para normalização automática)
         """
         # Configurações padrão
         self.config = {
             'missing_values_strategy': 'median',
-            'outlier_strategy': 'clip',
-            'categorical_strategy': 'onehot',
-            'normalization': True,
-            'max_categories': 20,
+            'outlier_method': 'clip',
             'outlier_threshold': 3.0,  # Z-score threshold para outliers
+            'winsorize_percentiles': (0.05, 0.95),  # Percentis para winsorization
+            'categorical_strategy': 'onehot',
+            'normalization': True,     # True, False ou 'auto'
+            'max_categories': 20,
+            'model_type': None,        # Tipo de modelo para normalização automática
+            'verbosity': 1  # nível de detalhamento dos logs
         }
         
         # Atualizar com configurações personalizadas
@@ -60,6 +69,27 @@ class PreProcessor:
         self.preprocessor = None
         self.column_types = {}
         self.fitted = False
+         # Configurar logging
+        self._setup_logging()
+        
+        self.logger.info("Explorer inicializado com sucesso.")
+        
+    def _setup_logging(self):
+        """Configura o sistema de logging do PreProcessor."""
+        self.logger = logging.getLogger("AutoFE.PreProcessor")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        
+        log_levels = {
+            0: logging.WARNING,
+            1: logging.INFO,
+            2: logging.DEBUG
+        }
+        self.logger.setLevel(log_levels.get(self.config['verbosity'], logging.INFO))
+
     
     def _identify_column_types(self, df: pd.DataFrame) -> Dict:
         """
@@ -106,6 +136,40 @@ class PreProcessor:
             'datetime': datetime_cols
         }
     
+    def _is_normalization_needed(self) -> bool:
+        """
+        Determina se a normalização é necessária com base na configuração ou tipo de modelo.
+        
+        Returns:
+            bool: True se a normalização for recomendada, False caso contrário
+        """
+        # Se a normalização for explicitamente definida (True/False)
+        if isinstance(self.config['normalization'], bool):
+            return self.config['normalization']
+        
+        # Se configurado para automático, decidir com base no tipo de modelo
+        if self.config['normalization'] == 'auto':
+            model_type = self.config['model_type']
+            
+            # Se o tipo de modelo for especificado
+            if model_type:
+                # Modelos insensíveis à escala
+                if model_type.lower() in ['tree', 'forest', 'randomforest', 'decisiontree', 
+                                         'boosting', 'xgboost', 'lightgbm', 'catboost']:
+                    return False
+                    
+                # Modelos sensíveis à escala
+                elif model_type.lower() in ['linear', 'logistic', 'regression', 'svm', 
+                                           'nn', 'neural', 'knn', 'neighbors', 'kmeans', 
+                                           'pca', 'lda']:
+                    return True
+            
+            # Comportamento padrão: normalizar por segurança
+            return True
+            
+        # Por padrão, normalizar
+        return True
+    
     def _handle_outliers(self, df: pd.DataFrame, numeric_cols: List[str]) -> pd.DataFrame:
         """
         Trata outliers em colunas numéricas de acordo com a estratégia configurada.
@@ -118,46 +182,94 @@ class PreProcessor:
             pd.DataFrame: DataFrame com outliers tratados
         """
         df_processed = df.copy()
-        z_threshold = self.config['outlier_threshold']
+        outlier_method = self.config['outlier_method']
         
         # Filtrar apenas as colunas numéricas existentes
         valid_num_cols = [col for col in numeric_cols if col in df.columns]
         
-        if self.config['outlier_strategy'] == 'remove':
-            # Criar máscara para identificar linhas sem outliers
+        if outlier_method == 'remove':
+            # Método: remoção de outliers baseado em z-score
+            z_threshold = self.config['outlier_threshold']
             mask = pd.Series(True, index=df.index)
             
             for col in valid_num_cols:
-                # Verificar se a coluna é numérica e tem dados suficientes
                 if pd.api.types.is_numeric_dtype(df[col]) and df[col].notna().sum() > 1:
                     col_std = df[col].std()
                     col_mean = df[col].mean()
                     
-                    # Só considerar outliers se houver variabilidade significativa
                     if col_std > 0 and not np.isnan(col_std):
                         z_scores = np.abs((df[col] - col_mean) / col_std)
-                        # Criar submáscara com tratamento para NaN
                         outlier_mask = (z_scores < z_threshold) | z_scores.isna()
                         mask = mask & outlier_mask
             
             # Aplicar máscara para remover linhas com outliers
             df_processed = df[mask].reset_index(drop=True)
             
-        elif self.config['outlier_strategy'] == 'clip':
-            # Clipping de valores extremos
+        elif outlier_method == 'clip':
+            # Método: clipping de valores extremos baseado em z-score
+            z_threshold = self.config['outlier_threshold']
+            
             for col in valid_num_cols:
-                # Verificar se a coluna é numérica e tem dados suficientes
                 if pd.api.types.is_numeric_dtype(df[col]) and df[col].notna().sum() > 1:
                     col_std = df[col].std()
                     col_mean = df[col].mean()
                     
-                    # Só fazer clipping se houver variabilidade significativa
                     if col_std > 0 and not np.isnan(col_std):
                         lower_bound = col_mean - z_threshold * col_std
                         upper_bound = col_mean + z_threshold * col_std
                         df_processed[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
                     
+        elif outlier_method == 'winsorize':
+            # Método: winsorization baseado em percentis
+            lower_percentile, upper_percentile = self.config['winsorize_percentiles']
+            
+            for col in valid_num_cols:
+                if pd.api.types.is_numeric_dtype(df[col]) and df[col].notna().sum() > 1:
+                    # Calcular percentis
+                    lower_limit = df[col].quantile(lower_percentile)
+                    upper_limit = df[col].quantile(upper_percentile)
+                    
+                    # Aplicar Winsorization
+                    df_processed[col] = df[col].clip(lower=lower_limit, upper=upper_limit)
+        
         return df_processed
+    
+    def optimize_normalization(self, X: pd.DataFrame, y: pd.Series, model: Any, cv: int = 5) -> bool:
+        """
+        Avalia experimentalmente se a normalização melhora o desempenho do modelo.
+        
+        Args:
+            X (pd.DataFrame): Features
+            y (pd.Series): Target
+            model: Modelo a ser avaliado
+            cv (int): Número de folds para validação cruzada
+        
+        Returns:
+            bool: True se normalização melhorar o desempenho, False caso contrário
+        """
+        from sklearn.model_selection import cross_val_score
+        
+        # Configurar preprocessador com normalização
+        config_norm = self.config.copy()
+        config_norm['normalization'] = True
+        prep_norm = PreProcessor(config_norm)
+        X_norm = prep_norm.fit_transform(X)
+        
+        # Configurar preprocessador sem normalização
+        config_no_norm = self.config.copy()
+        config_no_norm['normalization'] = False
+        prep_no_norm = PreProcessor(config_no_norm)
+        X_no_norm = prep_no_norm.fit_transform(X)
+        
+        # Avaliar desempenho com validação cruzada
+        score_norm = cross_val_score(model, X_norm, y, cv=cv).mean()
+        score_no_norm = cross_val_score(model, X_no_norm, y, cv=cv).mean()
+        
+        # Atualizar a configuração com base no resultado
+        self.config['normalization'] = score_norm > score_no_norm
+        
+        # Retornar o resultado
+        return score_norm > score_no_norm
     
     def fit(self, df: pd.DataFrame, target_col: Optional[str] = None) -> 'PreProcessor':
         """
@@ -174,16 +286,27 @@ class PreProcessor:
         data = df.copy()
         
         # Remover coluna target caso seja fornecida
-        if target_col and target_col in data.columns:
-            data = data.drop(columns=[target_col])
+        # Excluir a coluna alvo do processamento, se fornecida e existir
+        if target_col is not None:
+            if isinstance(target_col, str):
+                if target_col in data.columns:
+                    self.logger.info(f"Excluindo coluna alvo '{target_col}' do processamento.")
+                    data = data.drop(columns=[target_col])
+                else:
+                    self.logger.warning(f"Coluna alvo '{target_col}' não encontrada no DataFrame.")
+            else:
+                self.logger.warning(f"target_col deve ser uma string, recebido: {type(target_col)}")
         
         # Identificar tipos de colunas
         self.column_types = self._identify_column_types(data)
         
+        # Determinar se deve usar normalização
+        should_normalize = self._is_normalization_needed()
+        
         # Definir transformadores para cada tipo de coluna
         numeric_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy=self.config['missing_values_strategy'])),
-            ('scaler', StandardScaler() if self.config['normalization'] else 'passthrough')
+            ('scaler', StandardScaler() if should_normalize else 'passthrough')
         ])
         
         # Definir transformador categórico baseado na estratégia configurada
