@@ -14,6 +14,8 @@ from sklearn.ensemble import IsolationForest
 from scipy import stats
 import joblib
 import os
+from typing import List, Dict, Callable, Optional, Union
+
 
 class PreProcessor:
     def __init__(self, config: Optional[Dict] = None):
@@ -27,7 +29,11 @@ class PreProcessor:
             'generate_features': True,
             'verbosity': 1,
             'min_pca_components': 10,
-            'correlation_threshold': 0.95
+            'correlation_threshold': 0.95,
+            'balance_classes': False,
+            'balance_method': 'smote',  # 'smote', 'adasyn', 'random_over', 'random_under', 'tomek', 'nearmiss', 'smoteenn', 'smotetomek'
+            'sampling_strategy': 'auto',  # 'auto', float (proporção minoritária/majoritária), ou dicionário
+            'use_sample_weights': False   # Se deve usar pesos de amostra em vez de balanceamento
         }
         if config:
             self.config.update(config)
@@ -37,6 +43,7 @@ class PreProcessor:
         self.fitted = False
         self.feature_names = []
         self.target_col = None
+        self.sample_weights = None
         
         self._setup_logging()
         self.logger.info("PreProcessor inicializado com sucesso.")
@@ -59,54 +66,184 @@ class PreProcessor:
         """
         Remove outliers do DataFrame usando o método especificado.
         Aplica a detecção e remoção de outliers apenas em colunas numéricas.
+        Preserva exemplos da classe minoritária em problemas de classificação desbalanceados.
         """
         method = self.config['outlier_method']
-        if df.empty:
-            self.logger.warning("DataFrame vazio antes da remoção de outliers. Pulando esta etapa.")
+        if method is None or df.empty:
+            self.logger.info("Remoção de outliers desativada ou DataFrame vazio. Pulando esta etapa.")
             return df
 
-        # Seleciona apenas colunas numéricas para detecção de outliers
-        numeric_df = df.select_dtypes(include=['number'])
+        # Verificar se temos um problema de classificação desbalanceado
+        preserve_minority = False
+        minority_indices = []
         
-        if numeric_df.empty:
+        if self.target_col and self.target_col in df.columns:
+            y = df[self.target_col]
+            # Verificar se parece ser classificação (categórico ou poucos valores únicos)
+            is_classification = pd.api.types.is_categorical_dtype(y) or pd.api.types.is_object_dtype(y) or y.nunique() <= 10
+            
+            if is_classification and y.nunique() >= 2:
+                # Calcular balanceamento das classes
+                class_counts = y.value_counts()
+                min_class_ratio = class_counts.min() / class_counts.max()
+                
+                # Se fortemente desbalanceado (menos de 10% da classe majoritária)
+                if min_class_ratio < 0.1:
+                    preserve_minority = True
+                    minority_class = class_counts.idxmin()
+                    minority_indices = df[df[self.target_col] == minority_class].index
+                    self.logger.info(f"Detectado problema de classificação desbalanceado. "
+                                    f"Preservando {len(minority_indices)} exemplos da classe minoritária.")
+
+        # Seleciona apenas colunas numéricas para detecção de outliers
+        numeric_df = df.select_dtypes(include=['number']).columns.tolist()
+        
+        # Remove a coluna target da análise de outliers se for numérica
+        if self.target_col in numeric_df:
+            numeric_df.remove(self.target_col)
+        
+        if not numeric_df:
             self.logger.warning("Nenhuma coluna numérica encontrada para detecção de outliers. Pulando esta etapa.")
             return df
         
+        # Usa apenas as colunas numéricas para detecção
+        numeric_data = df[numeric_df]
+        
+        # Configuração adaptativa para limites de detecção
+        # Mais conservador para datasets menores ou com alta porcentagem de valores atípicos
+        samples_threshold = 10000
+        conservative = df.shape[0] < samples_threshold
+        
         if method == 'zscore':
-            # Aplica Z-score apenas em colunas numéricas
-            z_scores = np.abs(stats.zscore(numeric_df))
-            keep_mask = (z_scores < 3).all(axis=1)
-            filtered_df = df[keep_mask]
+            # Z-score adaptativo (limite mais alto para datasets pequenos)
+            zscore_threshold = 4.0 if conservative else 3.0
+            
+            # Preenche valores ausentes para cálculo do z-score
+            numeric_filled = numeric_data.fillna(numeric_data.median())
+            
+            # Calcula z-scores
+            z_scores = np.abs(stats.zscore(numeric_filled, nan_policy='omit'))
+            
+            # Identifica inliers
+            keep_mask = (z_scores < zscore_threshold).all(axis=1)
+            
         elif method == 'iqr':
-            # Aplica IQR apenas em colunas numéricas
-            Q1 = numeric_df.quantile(0.25)
-            Q3 = numeric_df.quantile(0.75)
+            # Calcula quartis
+            Q1 = numeric_data.quantile(0.25)
+            Q3 = numeric_data.quantile(0.75)
             IQR = Q3 - Q1
             
-            # Cria uma máscara para valores dentro do intervalo aceitável
-            keep_mask = ~((numeric_df < (Q1 - 1.5 * IQR)) | (numeric_df > (Q3 + 1.5 * IQR))).any(axis=1)
-            filtered_df = df[keep_mask]
+            # Limites mais conservadores para datasets pequenos
+            iqr_factor = 3.0 if conservative else 1.5
+            
+            # Cria máscara para valores dentro do intervalo aceitável
+            keep_mask = ~((numeric_data < (Q1 - iqr_factor * IQR)) | 
+                        (numeric_data > (Q3 + iqr_factor * IQR))).any(axis=1)
+            
         elif method == 'isolation_forest':
-            # Aplica Isolation Forest com contaminação mais baixa (pode ser ajustada)
-            clf = IsolationForest(contamination=0.01, random_state=42, n_estimators=100)
-            outliers = clf.fit_predict(numeric_df)
-            filtered_df = df[outliers == 1]
-        elif method == 'lof':
-            # Novo método: Local Outlier Factor para melhor detecção em datasets não balanceados
-            from sklearn.neighbors import LocalOutlierFactor
-            clf = LocalOutlierFactor(n_neighbors=20, contamination=0.01)
-            outliers = clf.fit_predict(numeric_df)
-            filtered_df = df[outliers == 1]  # 1 são inliers, -1 são outliers
+            # Ajusta contaminação com base no tamanho do dataset
+            # Menor contaminação para datasets pequenos
+            contamination = 0.01 if conservative else 0.05
+            
+            # Preenche valores ausentes
+            numeric_filled = numeric_data.fillna(numeric_data.median())
+            
+            # Aplica isolation forest
+            clf = IsolationForest(contamination=contamination, random_state=42, n_estimators=100)
+            outliers = clf.fit_predict(numeric_filled)
+            
+            # -1 são outliers, 1 são inliers
+            keep_mask = outliers == 1
+            
         else:
-            return df  # Caso o método não seja reconhecido, retorna o DataFrame original
-
-        if filtered_df.empty:
-            self.logger.warning("Todas as amostras foram removidas na remoção de outliers! Retornando DataFrame original.")
-            return df  # Retorna o DataFrame original caso a remoção tenha eliminado tudo
-
-        self.logger.info(f"Foram removidos {len(df) - len(filtered_df)} outliers ({(len(df) - len(filtered_df)) / len(df) * 100:.2f}% dos dados)")
+            self.logger.warning(f"Método de detecção de outliers '{method}' não reconhecido. Mantendo todos os dados.")
+            return df
+        
+        # Se preservando classes minoritárias, inclui seus índices
+        if preserve_minority and len(minority_indices) > 0:
+            keep_mask = keep_mask | df.index.isin(minority_indices)
+        
+        # Aplica a máscara ao DataFrame
+        filtered_df = df[keep_mask]
+        
+        # Verifica se não removeu quase todos os dados
+        if len(filtered_df) < len(df) * 0.5:
+            self.logger.warning(f"Mais de 50% dos dados seriam removidos como outliers. "
+                                f"Usando limites mais conservadores.")
+            # Ajusta para uma abordagem mais conservadora
+            return self._remove_outliers_conservative(df, preserve_minority, minority_indices)
+        
+        # Verifica se não removeu todos os dados ou quase todos
+        if filtered_df.empty or len(filtered_df) < 10:
+            self.logger.warning("Remoção de outliers removeria todos ou quase todos os dados. "
+                                "Retornando DataFrame original.")
+            return df
+        
+        # Se preservando classes minoritárias, verifica se todas foram mantidas
+        if preserve_minority:
+            preserved_count = sum(filtered_df.index.isin(minority_indices))
+            if preserved_count < len(minority_indices):
+                self.logger.warning(f"Alguns exemplos da classe minoritária foram perdidos "
+                                f"({preserved_count}/{len(minority_indices)} preservados). "
+                                f"Ajustando limites para preservar todos.")
+                # Inclui todos os exemplos da classe minoritária
+                missing_indices = [idx for idx in minority_indices if idx not in filtered_df.index]
+                filtered_df = pd.concat([filtered_df, df.loc[missing_indices]])
+        
+        self.logger.info(f"Foram removidos {len(df) - len(filtered_df)} outliers "
+                        f"({(len(df) - len(filtered_df)) / len(df) * 100:.2f}% dos dados)")
         return filtered_df
 
+    def _remove_outliers_conservative(self, df: pd.DataFrame, preserve_minority: bool = False, 
+                                    minority_indices: list = None) -> pd.DataFrame:
+        """
+        Versão mais conservadora da remoção de outliers, para quando a remoção padrão
+        for muito agressiva.
+        """
+        # Seleciona apenas colunas numéricas
+        numeric_df = df.select_dtypes(include=['number']).columns.tolist()
+        if self.target_col in numeric_df:
+            numeric_df.remove(self.target_col)
+        
+        numeric_data = df[numeric_df]
+        
+        # Usa limites muito mais conservadores
+        Q1 = numeric_data.quantile(0.01)  # 1º percentil em vez de 25º
+        Q3 = numeric_data.quantile(0.99)  # 99º percentil em vez de 75º
+        IQR = Q3 - Q1
+        
+        # Limites 5x mais permissivos
+        keep_mask = ~((numeric_data < (Q1 - 5.0 * IQR)) | 
+                    (numeric_data > (Q3 + 5.0 * IQR))).any(axis=1)
+        
+        # Preserva classe minoritária
+        if preserve_minority and minority_indices:
+            keep_mask = keep_mask | df.index.isin(minority_indices)
+        
+        # Aplica a máscara
+        filtered_df = df[keep_mask]
+        
+        # Se ainda remover muitos dados, usa uma abordagem ainda mais conservadora
+        if len(filtered_df) < len(df) * 0.8:
+            self.logger.warning("Mesmo com limites conservadores, muitos dados seriam removidos. "
+                            "Removendo apenas outliers extremos.")
+            
+            # Detecta apenas outliers muito extremos (> 10 desvios padrão)
+            numeric_filled = numeric_data.fillna(numeric_data.median())
+            z_scores = np.abs(stats.zscore(numeric_filled, nan_policy='omit'))
+            extreme_mask = (z_scores < 10.0).all(axis=1)
+            
+            # Preserva classe minoritária
+            if preserve_minority and minority_indices:
+                extreme_mask = extreme_mask | df.index.isin(minority_indices)
+                
+            filtered_df = df[extreme_mask]
+        
+        self.logger.info(f"Com abordagem conservadora, foram removidos {len(df) - len(filtered_df)} outliers "
+                        f"({(len(df) - len(filtered_df)) / len(df) * 100:.2f}% dos dados)")
+        
+        return filtered_df
+    
     def _remove_high_correlation(self, df):
         # Se não houver pelo menos 2 colunas, não há como calcular correlação
         if df.shape[1] < 2:
@@ -687,150 +824,170 @@ class PreProcessor:
             self.logger.error(f"Erro na redução de dimensionalidade: {e}")
             return df  # Retorna o DataFrame sem alterações se houver erro
     
-    def _balance_dataset(self, df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+    def _compute_sample_weights(y: pd.Series) -> np.ndarray:
         """
-        Aplica técnicas de balanceamento para lidar com classes desbalanceadas.
+        Calcula pesos de amostra para lidar com classes desbalanceadas.
+        
+        Args:
+            y: Série com a variável alvo
+            
+        Returns:
+            Array com pesos para cada amostra
+        """
+        try:
+            # Calcula pesos de classe para balancear
+            classes = np.unique(y)
+            weights = compute_class_weight(class_weight='balanced', classes=classes, y=y)
+            
+            # Mapeia classes para seus pesos
+            class_weight_dict = {c: w for c, w in zip(classes, weights)}
+            
+            # Atribui peso para cada amostra
+            sample_weights = np.array([class_weight_dict[c] for c in y])
+            
+            return sample_weights
+        
+        except Exception as e:
+            logging.error(f"Erro ao calcular pesos de amostra: {e}")
+            # Retorna pesos iguais como fallback
+            return np.ones(len(y))
+    
+    def _balance_dataset(df: pd.DataFrame, target_col: str, 
+                        balance_method: str = 'smote', 
+                        sampling_strategy: Union[str, float, Dict] = 'auto',
+                        random_state: int = 42) -> pd.DataFrame:
+        """
+        Equilibra um dataset usando várias técnicas para lidar com classes desbalanceadas.
         
         Args:
             df: DataFrame com os dados
-            target_col: Nome da coluna alvo (obrigatório)
-                
+            target_col: Nome da coluna alvo
+            balance_method: Método de balanceamento ('smote', 'adasyn', 'random_over',
+                        'random_under', 'tomek', 'nearmiss', 'smoteenn', 'smotetomek')
+            sampling_strategy: Estratégia de amostragem ('auto', float, ou dict)
+            random_state: Semente aleatória para reprodutibilidade
+        
         Returns:
             DataFrame balanceado
         """
-        if not self.config.get('balance_classes', False) or target_col is None or target_col not in df.columns:
-            return df
+        if target_col not in df.columns:
+            raise ValueError(f"Coluna target '{target_col}' não encontrada no DataFrame")
         
-        # Verifica se estamos tratando de um problema de classificação
+        # Verifica se estamos lidando com um problema de classificação
         y = df[target_col]
         if not (pd.api.types.is_categorical_dtype(y) or pd.api.types.is_object_dtype(y) or y.nunique() <= 10):
-            self.logger.info("Target não parece ser categórico. Pulando balanceamento de classes.")
-            return df
+            raise ValueError("Balanceamento só é aplicável para problemas de classificação")
+
+        # Extrair features e target
+        X = df.drop(columns=[target_col])
         
-        # Obtém a contagem de classes
+        # Verifica desbalanceamento
         class_counts = y.value_counts()
-        self.logger.info(f"Distribuição de classes original: {class_counts.to_dict()}")
-        
-        # Verifica se há desbalanceamento significativo
         min_class_ratio = class_counts.min() / class_counts.max()
-        if min_class_ratio >= 0.2:  # Se a classe minoritária for pelo menos 20% da majoritária
-            self.logger.info(f"Dataset relativamente balanceado (ratio: {min_class_ratio:.2f}). Pulando balanceamento.")
+        
+        if min_class_ratio >= 0.8:
+            # Dataset já está relativamente balanceado (proporção mínima de 80%)
+            logging.info("Dataset já está razoavelmente balanceado. Mantendo dados originais.")
             return df
         
-        # Método de balanceamento
-        balance_method = self.config.get('balance_method', 'smote')
-        self.logger.info(f"Aplicando balanceamento de classes com método: {balance_method}")
+        logging.info(f"Aplicando método de balanceamento: {balance_method}")
+        logging.info(f"Distribuição original de classes: {class_counts.to_dict()}")
         
         # Separar features e target
         X = df.drop(columns=[target_col])
         
+        # Identificar colunas categóricas para codificação temporária
+        cat_cols = X.select_dtypes(include=['object', 'category']).columns
+        X_encoded = X.copy()
+        
+        # Codificar temporariamente variáveis categóricas
+        if len(cat_cols) > 0:
+            from sklearn.preprocessing import OrdinalEncoder
+            encoders = {}
+            for col in cat_cols:
+                encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+                X_encoded[col] = encoder.fit_transform(X_encoded[[col]])
+                encoders[col] = encoder
+        
         try:
-            # Verifica se há colunas categóricas
-            cat_cols = X.select_dtypes(include=['object', 'category']).columns
-            
-            if balance_method == 'smote':
-                try:
-                    # Codifica temporariamente variáveis categóricas para usar SMOTE
-                    X_encoded = X.copy()
-                    encoders = {}
-                    
-                    for col in cat_cols:
-                        from sklearn.preprocessing import OrdinalEncoder
-                        encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-                        X_encoded[col] = encoder.fit_transform(X_encoded[[col]])
-                        encoders[col] = encoder
-                    
-                    # Importa e aplica SMOTE
-                    from imblearn.over_sampling import SMOTE
-                    smote = SMOTE(random_state=42, k_neighbors=min(5, class_counts.min() - 1))
-                    X_resampled, y_resampled = smote.fit_resample(X_encoded, y)
-                    
-                    # Restaura codificação original das variáveis categóricas
-                    for col in cat_cols:
-                        X_resampled[col] = encoders[col].inverse_transform(X_resampled[[col]])
-                    
-                except (ImportError, ValueError) as e:
-                    self.logger.warning(f"Erro ao aplicar SMOTE: {e}. Usando RandomOverSampler como fallback.")
-                    # Fallback para RandomOverSampler se SMOTE falhar
-                    from imblearn.over_sampling import RandomOverSampler
-                    ros = RandomOverSampler(random_state=42)
-                    X_resampled, y_resampled = ros.fit_resample(X, y)
+            # Import técnicas de balanceamento
+            if balance_method in ['smote', 'borderline', 'svm']:
+                from imblearn.over_sampling import SMOTE, BorderlineSMOTE, SVMSMOTE
+                if balance_method == 'smote':
+                    sampler = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+                elif balance_method == 'borderline':
+                    sampler = BorderlineSMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+                elif balance_method == 'svm':
+                    sampler = SVMSMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
             
             elif balance_method == 'adasyn':
-                try:
-                    # Codifica temporariamente variáveis categóricas para usar ADASYN
-                    X_encoded = X.copy()
-                    encoders = {}
-                    
-                    for col in cat_cols:
-                        from sklearn.preprocessing import OrdinalEncoder
-                        encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-                        X_encoded[col] = encoder.fit_transform(X_encoded[[col]])
-                        encoders[col] = encoder
-                    
-                    # Importa e aplica ADASYN
-                    from imblearn.over_sampling import ADASYN
-                    adasyn = ADASYN(random_state=42, n_neighbors=min(5, class_counts.min() - 1))
-                    X_resampled, y_resampled = adasyn.fit_resample(X_encoded, y)
-                    
-                    # Restaura codificação original das variáveis categóricas
-                    for col in cat_cols:
-                        X_resampled[col] = encoders[col].inverse_transform(X_resampled[[col]])
-                        
-                except (ImportError, ValueError) as e:
-                    self.logger.warning(f"Erro ao aplicar ADASYN: {e}. Usando RandomOverSampler como fallback.")
-                    # Fallback para RandomOverSampler
-                    from imblearn.over_sampling import RandomOverSampler
-                    ros = RandomOverSampler(random_state=42)
-                    X_resampled, y_resampled = ros.fit_resample(X, y)
+                from imblearn.over_sampling import ADASYN
+                sampler = ADASYN(sampling_strategy=sampling_strategy, random_state=random_state)
+            
+            elif balance_method == 'random_over':
+                from imblearn.over_sampling import RandomOverSampler
+                sampler = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=random_state)
+            
+            elif balance_method == 'random_under':
+                from imblearn.under_sampling import RandomUnderSampler
+                sampler = RandomUnderSampler(sampling_strategy=sampling_strategy, random_state=random_state)
+            
+            elif balance_method == 'tomek':
+                from imblearn.under_sampling import TomekLinks
+                sampler = TomekLinks(sampling_strategy=sampling_strategy)
             
             elif balance_method == 'nearmiss':
-                try:
-                    # Importa e aplica NearMiss
-                    from imblearn.under_sampling import NearMiss
-                    nearmiss = NearMiss(version=3)
-                    X_resampled, y_resampled = nearmiss.fit_resample(X, y)
-                    
-                except (ImportError, ValueError) as e:
-                    self.logger.warning(f"Erro ao aplicar NearMiss: {e}. Usando RandomUnderSampler como fallback.")
-                    # Fallback para RandomUnderSampler
-                    from imblearn.under_sampling import RandomUnderSampler
-                    rus = RandomUnderSampler(random_state=42)
-                    X_resampled, y_resampled = rus.fit_resample(X, y)
+                from imblearn.under_sampling import NearMiss
+                sampler = NearMiss(sampling_strategy=sampling_strategy, version=3)
             
-            elif balance_method == 'combined':
-                try:
-                    # Combina over e under sampling
-                    from imblearn.combine import SMOTETomek
-                    smotetomek = SMOTETomek(random_state=42)
-                    X_resampled, y_resampled = smotetomek.fit_resample(X, y)
-                    
-                except (ImportError, ValueError) as e:
-                    self.logger.warning(f"Erro ao aplicar SMOTETomek: {e}. Usando balanceamento simples como fallback.")
-                    # Fallback para balanceamento simples
-                    from imblearn.over_sampling import RandomOverSampler
-                    ros = RandomOverSampler(random_state=42)
-                    X_resampled, y_resampled = ros.fit_resample(X, y)
+            elif balance_method == 'smoteenn':
+                from imblearn.combine import SMOTEENN
+                sampler = SMOTEENN(sampling_strategy=sampling_strategy, random_state=random_state)
+            
+            elif balance_method == 'smotetomek':
+                from imblearn.combine import SMOTETomek
+                sampler = SMOTETomek(sampling_strategy=sampling_strategy, random_state=random_state)
             
             else:
-                # Método não reconhecido, retorna o DataFrame original
-                self.logger.warning(f"Método de balanceamento '{balance_method}' não reconhecido.")
-                return df
+                raise ValueError(f"Método de balanceamento '{balance_method}' não reconhecido")
+            
+            # Aplicar técnica de balanceamento
+            X_resampled, y_resampled = sampler.fit_resample(X_encoded, y)
+            
+            # Restaurar codificação original das variáveis categóricas
+            if len(cat_cols) > 0:
+                for col in cat_cols:
+                    X_resampled[col] = encoders[col].inverse_transform(X_resampled[[col]])
             
             # Criar DataFrame balanceado
-            result_df = pd.DataFrame(X_resampled, columns=X.columns)
-            result_df[target_col] = y_resampled
+            balanced_df = X_resampled.copy()
+            balanced_df[target_col] = y_resampled
             
-            # Reporta resultados
-            new_class_counts = result_df[target_col].value_counts()
-            self.logger.info(f"Distribuição de classes após balanceamento: {new_class_counts.to_dict()}")
+            # Relatar resultados
+            new_class_counts = balanced_df[target_col].value_counts()
+            logging.info(f"Distribuição de classes após balanceamento: {new_class_counts.to_dict()}")
+            logging.info(f"Balanceamento alterou o tamanho do dataset: {len(df)} → {len(balanced_df)}")
             
-            return result_df
-            
+            return balanced_df
+        
+        except ImportError as e:
+            logging.warning(f"Erro ao importar bibliotecas para balanceamento: {e}. Instalando imbalanced-learn...")
+            try:
+                import pip
+                pip.main(['install', 'imbalanced-learn'])
+                logging.info("imbalanced-learn instalado. Tente executar novamente.")
+            except:
+                logging.error("Falha ao instalar imbalanced-learn. Mantendo dados originais.")
+            return df
+        
         except Exception as e:
-            self.logger.error(f"Erro no balanceamento de classes: {e}")
-            return df  # Retorna o DataFrame sem alterações se houver erro
-    
+            logging.error(f"Erro ao aplicar balanceamento: {e}. Mantendo dados originais.")
+            return df
+
+    def get_sample_weights(self) -> Optional[np.ndarray]:
+        """Retorna os pesos das amostras para classes desbalanceadas."""
+        return self.sample_weights
+
     def fit(self, df: pd.DataFrame, target_col: Optional[str] = None) -> 'PreProcessor':
         """
         Ajusta o preprocessador aos dados.
@@ -890,10 +1047,34 @@ class PreProcessor:
             else:
                 df_copy = self._select_best_features(df_copy)
         
-        # 6. Atualiza lista de tipos de colunas após transformações
+        # 6. Balancear classes se configurado
+        if self.config.get('balance_classes', False) and target_col and target_col in df_copy.columns:
+            # Se houver target, adicione-o de volta ao df_copy para balanceamento
+            if target_data is not None:
+                df_copy[target_col] = target_data
+            
+            # Balancear classes
+            df_copy = self._balance_dataset(
+                df_copy, 
+                target_col=target_col,
+                balance_method=self.config.get('balance_method', 'smote'),
+                sampling_strategy=self.config.get('sampling_strategy', 'auto'),
+                random_state=42
+            )
+            
+            # Remover target novamente
+            if target_col in df_copy.columns:
+                target_data = df_copy[target_col].copy()
+                df_copy = df_copy.drop(columns=[target_col])
+                
+        # 7 Calcular pesos de amostra se necessário
+        if self.config.get('use_sample_weights', False) and target_data is not None:
+            self.sample_weights = self._compute_sample_weights(target_data)
+    
+        # 8. Atualiza lista de tipos de colunas após transformações
         self.column_types = self._identify_column_types(df_copy)
         
-        # 7. Cria pipeline de transformação
+        # 8. Cria pipeline de transformação
         
         # Pipeline para features numéricas
         numeric_steps = []
@@ -947,7 +1128,7 @@ class PreProcessor:
         # Cria ColumnTransformer
         self.preprocessor = ColumnTransformer(transformers, remainder='passthrough')
         
-        # 8. Redução de dimensionalidade
+        # 9. Redução de dimensionalidade
         if self.config.get('dimensionality_reduction'):
             if self.config['dimensionality_reduction'] == 'pca':
                 # Determina número adequado de componentes
@@ -963,7 +1144,7 @@ class PreProcessor:
                 else:
                     self.logger.warning("Poucas features/amostras para PCA. Ignorando redução de dimensionalidade.")
         
-        # 9. Ajusta o preprocessador aos dados
+        # 10. Ajusta o preprocessador aos dados
         try:
             self.preprocessor.fit(df_copy)
             
@@ -988,6 +1169,7 @@ class PreProcessor:
     def transform(self, df: pd.DataFrame, target_col: Optional[str] = None) -> pd.DataFrame:
         """
         Aplica as transformações aprendidas a um conjunto de dados.
+        Versão melhorada com verificações de segurança para preservar exemplos.
         
         Args:
             df: DataFrame a ser transformado
@@ -1004,41 +1186,66 @@ class PreProcessor:
         # Cria uma cópia para evitar modificar o DataFrame original
         df_copy = df.copy()
         
-        # Salva a coluna alvo separadamente, se existir
+        # Salva classes e contagem original para verificação
         target_data = None
+        original_class_counts = None
         if target_col and target_col in df_copy.columns:
             target_data = df_copy[target_col].copy()
+            # Verifica se é classificação
+            is_classification = pd.api.types.is_categorical_dtype(target_data) or pd.api.types.is_object_dtype(target_data) or target_data.nunique() <= 10
+            
+            if is_classification:
+                original_class_counts = target_data.value_counts()
+                self.logger.info(f"Distribuição original das classes:\n{original_class_counts}")
+                
+            # Remove target do DataFrame
             df_copy = df_copy.drop(columns=[target_col])
         
-        # 1. Limpa os dados
-        # Trata valores ausentes
+        # 1. Trata valores ausentes
         df_copy = self._handle_missing_values(df_copy)
         
-        # Remove outliers (se configurado)
+        # 2. Remove outliers (se configurado)
         if self.config.get('outlier_method') and not self.config.get('skip_outlier_in_transform', False):
+            # Adiciona temporariamente o target para preservação durante remoção de outliers
+            if target_data is not None:
+                df_copy[target_col] = target_data
+                
             df_copy = self._remove_outliers(df_copy)
+            
+            # Remove o target novamente se foi adicionado
+            if target_data is not None:
+                target_data = df_copy[target_col].copy()  # Atualiza target_data para refletir as remoções
+                df_copy = df_copy.drop(columns=[target_col])
         
-        # 2. Gera novas features (se configurado)
+        # 3. Gera novas features (se configurado)
         if self.config.get('generate_features', True) and not self.config.get('skip_feature_generation_in_transform', False):
+            # Adiciona temporariamente o target para geração de features informativas
+            if target_data is not None:
+                df_copy[target_col] = target_data
+                
             df_copy = self._generate_features(df_copy, target_col)
+            
+            # Remove o target novamente se foi adicionado
+            if target_data is not None:
+                df_copy = df_copy.drop(columns=[target_col], errors='ignore')
         
-        # 3. Verifica features faltantes
+        # 4. Verifica features faltantes
         missing_cols = set(self.feature_names) - set(df_copy.columns)
         if missing_cols:
             self.logger.warning(f"Colunas ausentes na transformação: {missing_cols}. Adicionando com valores padrão.")
             for col in missing_cols:
                 df_copy[col] = 0
         
-        # 4. Remove colunas extras
+        # 5. Remove colunas extras
         extra_cols = set(df_copy.columns) - set(self.feature_names)
         if extra_cols:
             self.logger.warning(f"Colunas extras encontradas: {extra_cols}. Removendo.")
             df_copy = df_copy.drop(columns=list(extra_cols), errors='ignore')
         
-        # 5. Garante a mesma ordem das colunas usada no fit
+        # 6. Garante a mesma ordem das colunas usada no fit
         df_copy = df_copy[self.feature_names]
         
-        # 6. Aplica o preprocessador
+        # 7. Aplica o preprocessador
         try:
             df_transformed = self.preprocessor.transform(df_copy)
             
@@ -1048,7 +1255,7 @@ class PreProcessor:
             else:
                 result_df = pd.DataFrame(df_transformed, index=df_copy.index, columns=[f"feature_{i}" for i in range(df_transformed.shape[1])])
             
-            # Adiciona a coluna alvo, se existir
+            # 8. Adiciona a coluna alvo, se existir
             if target_data is not None:
                 # Filtra target_data para manter apenas índices presentes no result_df
                 common_indices = result_df.index.intersection(target_data.index)
@@ -1059,10 +1266,22 @@ class PreProcessor:
                 # Adiciona a coluna alvo usando apenas os índices comuns
                 result_df = result_df.loc[common_indices]
                 result_df[target_col] = target_data.loc[common_indices]
+                
+                # Verifica se mantivemos exemplos de todas as classes
+                if original_class_counts is not None:
+                    final_class_counts = result_df[target_col].value_counts()
+                    self.logger.info(f"Distribuição final das classes:\n{final_class_counts}")
+                    
+                    # Verifica se perdemos alguma classe
+                    for cls in original_class_counts.index:
+                        if cls not in final_class_counts:
+                            self.logger.warning(f"ATENÇÃO: A classe {cls} foi completamente removida durante o processamento!")
+                        elif final_class_counts[cls] < 5 and original_class_counts[cls] >= 5:
+                            self.logger.warning(f"ATENÇÃO: A classe {cls} tem menos de 5 exemplos após processamento!")
             
             self.logger.info(f"Transformação concluída. Dimensões do DataFrame resultante: {result_df.shape}")
             return result_df
-            
+                
         except Exception as e:
             self.logger.error(f"Erro ao aplicar transformações: {e}")
             raise
@@ -1076,229 +1295,7 @@ class PreProcessor:
     @classmethod
     def load(cls, filepath: str) -> 'PreProcessor':
         return joblib.load(filepath)
-    
-    
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("AutoFE.Explorer")
-
-
-class TransformationTree:
-    def __init__(self):
-        self.graph = nx.DiGraph()
-        self.graph.add_node("root", data=None)
-        logger.info("TransformationTree inicializada.")
-    
-    def add_transformation(self, parent: str, name: str, data, score: float = 0.0):
-        """Adiciona uma transformação à árvore."""
-        self.graph.add_node(name, data=data, score=score)
-        self.graph.add_edge(parent, name)
-        feature_diff = data.shape[1] - self.graph.nodes[parent]['data'].shape[1] if self.graph.nodes[parent]['data'] is not None else 0
-        logger.info(f"Transformação '{name}' adicionada com score {score}. Dimensão do conjunto: {data.shape}. Alteração nas features: {feature_diff}")
-    
-    def get_best_transformations(self, heuristic: Callable[[Dict], float]) -> List[str]:
-        """Retorna as melhores transformações baseadas em uma heurística."""
-        scored_nodes = {node: heuristic(self.graph.nodes[node]['data']) for node in self.graph.nodes if node != "root"}
-        best_transformations = sorted(scored_nodes, key=scored_nodes.get, reverse=True)
-        logger.info(f"Melhores transformações ordenadas: {best_transformations}")
-        return best_transformations
-
-class HeuristicSearch:
-    def __init__(self, heuristic: Callable[[pd.DataFrame, Optional[str]], float]):
-        self.heuristic = heuristic
-    
-    def search(self, tree: TransformationTree, target_col: Optional[str] = None) -> str:
-        """Executa uma busca heurística na árvore de transformações."""
-        best_nodes = tree.get_best_transformations(lambda data: self.heuristic(data, target_col))
-        best_node = best_nodes[0] if best_nodes else None
-        logger.info(f"Melhor transformação encontrada: {best_node}")
-        return best_node
-    
-    @staticmethod
-    def advanced_heuristic(df: pd.DataFrame, target_col: Optional[str] = None) -> float:
-        """
-        Heurística avançada que considera múltiplos fatores:
-        - Correlação entre features
-        - Diversidade categórica
-        - Relação com o target (se disponível)
-        - Balanceamento de classes (para classificação)
-        """
-        if df.empty:
-            return float('-inf')  # Penalização máxima para DataFrames vazios
-        
-        # Inicializa componentes do score
-        correlation_penalty = 0
-        categorical_diversity_score = 0
-        target_relation_score = 0
-        class_balance_score = 0
-        feature_count_penalty = 0
-        missing_values_penalty = 0
-        
-        # 1. Penaliza alta correlação entre features
-        numeric_features = df.select_dtypes(include=['number'])
-        
-        if numeric_features.shape[1] > 1:
-            try:
-                # Preenche valores ausentes para calcular correlação
-                numeric_features_filled = numeric_features.fillna(numeric_features.median())
-                correlation_matrix = numeric_features_filled.corr().abs()
-                
-                # Remove a diagonal
-                np.fill_diagonal(correlation_matrix.values, 0)
-                
-                # Calcula a média das correlações altas (> 0.7)
-                high_corr_mask = correlation_matrix > 0.7
-                if high_corr_mask.sum().sum() > 0:
-                    correlation_penalty = high_corr_mask.sum().sum() / (numeric_features.shape[1] ** 2)
-                
-            except Exception as e:
-                logger.warning(f"Erro ao calcular penalidade de correlação: {e}")
-        
-        # 2. Avalia diversidade de variáveis categóricas
-        categorical_features = df.select_dtypes(include=['object', 'category'])
-        if not categorical_features.empty:
-            try:
-                unique_counts = categorical_features.nunique()
-                categorical_diversity_score = unique_counts.mean() / max(1, unique_counts.max())  # Normaliza entre 0 e 1
-                
-                # Penaliza categorias com muitos valores únicos (potencial high cardinality)
-                high_cardinality_penalty = sum(unique_counts > 100) / max(1, len(unique_counts))
-                categorical_diversity_score -= high_cardinality_penalty * 0.5
-                
-            except Exception as e:
-                logger.warning(f"Erro ao calcular score de diversidade categórica: {e}")
-        
-        # 3. Avalia relação com o target (se disponível)
-        if target_col and target_col in df.columns:
-            y = df[target_col]
-            X = df.drop(columns=[target_col])
-            
-            # Calcula diferentes métricas dependendo do tipo de target
-            if pd.api.types.is_numeric_dtype(y) and y.nunique() > 10:  # Regressão
-                try:
-                    # Para regressão, calcula correlação com o target
-                    numeric_X = X.select_dtypes(include=['number'])
-                    if not numeric_X.empty:
-                        # Preenche valores ausentes para calcular correlação
-                        numeric_X_filled = numeric_X.fillna(numeric_X.median())
-                        y_filled = y.fillna(y.median())
-                        
-                        correlations = [abs(np.corrcoef(numeric_X_filled[col], y_filled)[0, 1]) 
-                                        for col in numeric_X_filled.columns]
-                        target_relation_score = sum(abs(c) > 0.1 for c in correlations) / len(correlations)
-                except Exception as e:
-                    logger.warning(f"Erro ao calcular score de relação com target (regressão): {e}")
-                    
-            else:  # Classificação
-                try:
-                    # Para classificação, avalia balanceamento de classes
-                    class_counts = y.value_counts(normalize=True)
-                    # Penaliza classes muito desbalanceadas
-                    class_balance_score = 1 - (class_counts.max() - class_counts.min())
-                    
-                    # Calcula entropia da distribuição de classes (mais alto = melhor balanceamento)
-                    from scipy.stats import entropy
-                    class_balance_score = entropy(class_counts) / np.log(len(class_counts))
-                    
-                    # Avalia poder preditivo das features (ratio-based)
-                    categorical_X = X.select_dtypes(include=['object', 'category'])
-                    if not categorical_X.empty:
-                        target_relation_scores = []
-                        for col in categorical_X.columns[:5]:  # Limita a 5 colunas para eficiência
-                            # Calcula target encoding e verifica variância
-                            target_means = df.groupby(col)[target_col].mean()
-                            target_relation_scores.append(target_means.var())
-                        if target_relation_scores:
-                            target_relation_score = sum(s > 0.01 for s in target_relation_scores) / len(target_relation_scores)
-                except Exception as e:
-                    logger.warning(f"Erro ao calcular score de relação com target (classificação): {e}")
-        
-        # 4. Penaliza conjuntos com muitas features (para evitar overfitting)
-        feature_count = df.shape[1]
-        feature_count_penalty = max(0, (feature_count - 20) / 100)  # Começa a penalizar acima de 20 features
-        
-        # 5. Penaliza valores ausentes
-        missing_ratio = df.isna().mean().mean()
-        missing_values_penalty = missing_ratio * 0.5  # Penaliza até 0.5 pontos por valores ausentes
-        
-        # Combina todos os scores com pesos
-        final_score = (
-            -0.3 * correlation_penalty +            # Penaliza correlação alta
-            0.2 * categorical_diversity_score +     # Recompensa diversidade categórica
-            0.3 * target_relation_score +           # Recompensa relação com target
-            0.2 * class_balance_score -             # Recompensa balanceamento de classes
-            0.1 * feature_count_penalty -           # Penaliza muitas features
-            0.1 * missing_values_penalty            # Penaliza valores ausentes
-        )
-        
-        logger.debug(f"Scores da heurística: corr_penalty={correlation_penalty:.3f}, "
-                   f"cat_diversity={categorical_diversity_score:.3f}, "
-                   f"target_relation={target_relation_score:.3f}, "
-                   f"class_balance={class_balance_score:.3f}, "
-                   f"final_score={final_score:.3f}")
-        
-        return final_score
-
-class Explorer:
-    def __init__(self, heuristic: Callable[[pd.DataFrame], float] = None, target_col: Optional[str] = None):
-        self.tree = TransformationTree()
-        self.search = HeuristicSearch(heuristic or HeuristicSearch.advanced_heuristic)
-        self.target_col = target_col
-    
-    def add_transformation(self, parent: str, name: str, data, score: float = 0.0):
-        """Adiciona uma transformação com uma pontuação atribuída."""
-        self.tree.add_transformation(parent, name, data, score)
-    
-    def find_best_transformation(self) -> str:
-        """Retorna a melhor transformação com base na busca heurística."""
-        return self.search.search(self.tree)
-    
-    def analyze_transformations(self, df):
-        """Testa diferentes transformações e escolhe a melhor para o PreProcessor."""
-        logger.info("Iniciando análise de transformações.")
-        if isinstance(df, np.ndarray):
-            df = pd.DataFrame(df, columns=[f"feature_{i}" for i in range(df.shape[1])])
-        
-        base_node = "root"
-        configurations = [
-            {"missing_values_strategy": "mean"},
-            {"missing_values_strategy": "median"},
-            {"missing_values_strategy": "most_frequent"},
-            {"outlier_method": "iqr"},
-            {"outlier_method": "zscore"},
-            {"outlier_method": "isolation_forest"},
-            {"categorical_strategy": "onehot"},
-            {"categorical_strategy": "ordinal"},
-            {"scaling": "standard"},
-            {"scaling": "minmax"},
-            {"scaling": "robust"},
-            {"dimensionality_reduction": "pca"},
-            {"feature_selection": "variance"},
-            {"generate_features": True},
-            {"generate_features": False}
-        ]
-        
-        for config in configurations:
-            name = "_".join([f"{key}-{value}" for key, value in config.items()])
-            logger.info(f"Testando transformação: {name}. Dimensão original: {df.shape}")
-            
-            if df.empty:
-                logger.warning(f"O DataFrame está vazio após remoção de outliers. Pulando transformação: {name}")
-                continue
-            
-            transformed_data = PreProcessor(config).fit(df, target_col=self.target_col if self.target_col else None).transform(df, target_col=self.target_col if self.target_col else None)
-            
-            if transformed_data.empty:
-                logger.warning(f"A transformação {name} resultou em um DataFrame vazio. Pulando.")
-                continue
-            
-            score = self.search.heuristic(transformed_data)
-            self.add_transformation(base_node, name, transformed_data, score)
-        
-        best_transformation = self.find_best_transformation()
-        logger.info(f"Melhor transformação final: {best_transformation}")
-        return self.tree.graph.nodes[best_transformation]['data'] if best_transformation else df
-
+  
 
 def create_preprocessor(config: Optional[Dict] = None) -> PreProcessor:
     return PreProcessor(config)
