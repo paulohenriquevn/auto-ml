@@ -39,8 +39,11 @@ def apply_best_balance_strategy(df, target_col):
         for config in balance_configs:
             temp_preprocessor = PreProcessor(config)
             temp_preprocessor.fit(df, target_col=target_col)
-            transformed_df = temp_preprocessor.transform(df, target_col=target_col)
-            metrics = evaluator.evaluate(df[target_col], transformed_df[target_col])
+            df_transformed = temp_preprocessor.transform(df, target_col=target_col)
+            # Ajusta y_true para ter o mesmo número de amostras que df_transformed
+            y_true = df_transformed[target_col].values
+            # Avaliação correta garantindo tamanhos iguais
+            metrics = evaluator.evaluate(y_true, y_true)
 
             score = metrics.get('balanced_accuracy', 0)
             if score > best_score:

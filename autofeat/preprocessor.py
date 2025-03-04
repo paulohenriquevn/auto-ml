@@ -1119,7 +1119,7 @@ class PreProcessor:
                 
         # 7 Calcular pesos de amostra se necessário
         if self.config.get('use_sample_weights', False) and target_data is not None:
-            self.sample_weights = self._compute_sample_weights(target_data)
+            self.sample_weights = self._compute_sample_weights(target_data, target_col)
     
         # 8. Atualiza lista de tipos de colunas após transformações
         self.column_types = self._identify_column_types(df_copy)
