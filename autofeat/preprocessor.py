@@ -1,8 +1,9 @@
+import os
+import joblib
+import logging
 import pandas as pd
 import numpy as np
-import logging
-import networkx as nx
-from typing import List, Dict, Callable
+from typing import Dict
 from typing import Dict, Optional
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, OrdinalEncoder, PolynomialFeatures
@@ -12,9 +13,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import IsolationForest
 from scipy import stats
-import joblib
-import os
-from typing import List, Dict, Callable, Optional, Union
+from typing import Dict, Optional, Union
 
 
 class PreProcessor:

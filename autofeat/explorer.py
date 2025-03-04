@@ -119,6 +119,17 @@ class TransformationNode:
         self.execution_time = 0
         self.feature_importance = {}
         self.parameters = {}
+        self._setup_logging()
+        self.logger.info("TransformationNode inicializado com sucesso.")
+
+    def _setup_logging(self):
+        self.logger = logging.getLogger("AutoFE.TransformationNode")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
     
     def add_child(self, child: 'TransformationNode'):
         """Adiciona um nó filho"""
@@ -149,7 +160,17 @@ class TransformationTree:
         # Nó raiz com configuração vazia
         self.graph.add_node("root", node=TransformationNode("root", {}))
         self.nodes = {"root": TransformationNode("root", {})}
-        logger.info("TransformationTree inicializada.")
+        self._setup_logging()
+        self.logger.info("TransformationTree inicializado com sucesso.")
+
+    def _setup_logging(self):
+        self.logger = logging.getLogger("AutoFE.TransformationTree")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
     
     def add_transformation(self, parent: str, name: str, config: Dict[str, Any], 
                           data=None, score: float = 0.0, metrics: Dict[str, float] = None,
@@ -202,7 +223,7 @@ class TransformationTree:
             feature_diff = data.shape[1] - self.nodes[parent].data.shape[1]
         
         metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in (metrics or {}).items()])
-        logger.info(f"Transformação '{name}' adicionada como '{node_id}' com score {score:.4f}. " +
+        self.logger.info(f"Transformação '{name}' adicionada como '{node_id}' com score {score:.4f}. " +
                    f"Dimensão: {data.shape if data is not None else 'N/A'}. " +
                    f"Alteração nas features: {feature_diff}. " +
                    f"Métricas: {metrics_str}. " +
@@ -247,9 +268,9 @@ class TransformationTree:
         best_nodes = [node_id for node_id, _ in sorted(scored_nodes, key=lambda x: x[1], reverse=True)[:limit]]
         
         if best_nodes:
-            logger.info(f"Melhores {len(best_nodes)} nós por {metric}: {best_nodes}")
+            self.logger.info(f"Melhores {len(best_nodes)} nós por {metric}: {best_nodes}")
         else:
-            logger.warning(f"Nenhum nó encontrado com métrica {metric} acima de {min_score}")
+            self.logger.warning(f"Nenhum nó encontrado com métrica {metric} acima de {min_score}")
             
         return best_nodes
     
@@ -370,7 +391,7 @@ class TransformationTree:
                     has_children = len(list(self.graph.successors(node_id))) > 0
                     
                     if not has_children:  # Remove apenas nós sem filhos
-                        logger.info(f"Removendo nó de baixo score: {node_id}")
+                        self.logger.info(f"Removendo nó de baixo score: {node_id}")
                         self.graph.remove_node(node_id)
                         if node_id in self.nodes:
                             del self.nodes[node_id]
@@ -422,7 +443,7 @@ class TransformationTree:
                 'nodes': serializable_nodes
             }, f)
         
-        logger.info(f"Árvore de transformações salva em {filepath}")
+        self.logger.info(f"Árvore de transformações salva em {filepath}")
     
     @classmethod
     def load(cls, filepath: str) -> 'TransformationTree':
@@ -442,7 +463,7 @@ class TransformationTree:
         tree.graph = data['graph']
         tree.nodes = data['nodes']
         
-        logger.info(f"Árvore de transformações carregada de {filepath}")
+        self.logger.info(f"Árvore de transformações carregada de {filepath}")
         return tree
 
 
@@ -466,7 +487,17 @@ class TransformationEvaluator:
         self.cv_folds = cv_folds
         self.random_state = random_state
         self.metrics = {}
-        logger.info(f"TransformationEvaluator inicializado. Target: {target_col}, Tipo: {problem_type}")
+        self._setup_logging()
+        self.logger.info("TransformationEvaluator inicializado com sucesso.")
+
+    def _setup_logging(self):
+        self.logger = logging.getLogger("AutoFE.TransformationEvaluator")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
     
     def detect_problem_type(self, y: pd.Series) -> str:
         """
@@ -518,7 +549,7 @@ class TransformationEvaluator:
                     metrics[f'{prefix}avg_correlation'] = corr_matrix.values.mean()
                     metrics[f'{prefix}high_correlation_ratio'] = (corr_matrix > 0.7).sum().sum() / (corr_matrix.shape[0] * corr_matrix.shape[1])
                 except Exception as e:
-                    logger.warning(f"Erro ao calcular correlação: {e}")
+                    self.logger.warning(f"Erro ao calcular correlação: {e}")
             
             return metrics
         
@@ -585,7 +616,7 @@ class TransformationEvaluator:
                                 scoring='roc_auc'
                             ))
                     except Exception as e:
-                        logger.warning(f"Erro ao calcular métricas de CV para classificação: {e}")
+                        self.logger.warning(f"Erro ao calcular métricas de CV para classificação: {e}")
                 
             elif problem_type == 'regression':
                 # Estatísticas da variável alvo
@@ -620,10 +651,10 @@ class TransformationEvaluator:
                             model, X_encoded, y, cv=min(self.cv_folds, 3), scoring='r2'
                         ))
                     except Exception as e:
-                        logger.warning(f"Erro ao calcular métricas de CV para regressão: {e}")
+                        self.logger.warning(f"Erro ao calcular métricas de CV para regressão: {e}")
         
         except Exception as e:
-            logger.error(f"Erro ao avaliar transformação: {e}")
+            self.logger.error(f"Erro ao avaliar transformação: {e}")
         
         return metrics
     
@@ -679,7 +710,7 @@ class TransformationEvaluator:
             feature_importance = {name: float(imp) for name, imp in zip(feature_names, importances)}
             
         except Exception as e:
-            logger.warning(f"Erro ao calcular importância das features: {e}")
+            self.logger.warning(f"Erro ao calcular importância das features: {e}")
         
         return feature_importance
     
@@ -791,18 +822,28 @@ class MetaLearner:
         self.experience_db = experience_db
         self.dataset_profiles = []
         self.transformation_results = []
-        
+        self._setup_logging()
         # Carrega experiências anteriores, se disponíveis
         if experience_db and os.path.exists(experience_db):
             try:
                 data = joblib.load(experience_db)
                 self.dataset_profiles = data.get('profiles', [])
                 self.transformation_results = data.get('results', [])
-                logger.info(f"Carregadas {len(self.dataset_profiles)} experiências anteriores")
+                self.logger.info(f"Carregadas {len(self.dataset_profiles)} experiências anteriores")
             except Exception as e:
-                logger.warning(f"Erro ao carregar banco de experiências: {e}")
+                self.logger.warning(f"Erro ao carregar banco de experiências: {e}")
         
-        logger.info("MetaLearner inicializado")
+        self.logger.info("MetaLearner inicializado")
+    
+
+    def _setup_logging(self):
+        self.logger = logging.getLogger("AutoFE.MetaLearner")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
     
     def profile_dataset(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Dict:
         """
@@ -846,7 +887,7 @@ class MetaLearner:
             except Exception:
                 profile['avg_correlation'] = 0
         
-        logger.info(f"Perfil do dataset criado: {profile}")
+        self.logger.info(f"Perfil do dataset criado: {profile}")
         return profile
     
     def find_similar_datasets(self, profile: Dict, top_k: int = 3) -> List[int]:
@@ -875,7 +916,7 @@ class MetaLearner:
         # Retorna os índices dos top_k mais similares
         top_indices = [idx for idx, _ in similarities[:top_k]]
         
-        logger.info(f"Datasets similares encontrados: {top_indices}")
+        self.logger.info(f"Datasets similares encontrados: {top_indices}")
         return top_indices
     
     def _calculate_profile_similarity(self, profile1: Dict, profile2: Dict) -> float:
@@ -962,7 +1003,7 @@ class MetaLearner:
         
         if not similar_indices:
             # Se não encontrou similares, retorna recomendações padrão
-            logger.info("Nenhum dataset similar encontrado. Usando recomendações padrão.")
+            self.logger.info("Nenhum dataset similar encontrado. Usando recomendações padrão.")
             return self._get_default_recommendations(df, target_col)
         
         # Coleta transformações que funcionaram bem em datasets similares
@@ -1004,7 +1045,7 @@ class MetaLearner:
                                                           n_recommendations - len(recommendations))
             recommendations.extend(default_recs)
         
-        logger.info(f"Geradas {len(recommendations)} recomendações de transformações")
+        self.logger.info(f"Geradas {len(recommendations)} recomendações de transformações")
         return [r['config'] for r in recommendations]
     
     def _get_default_recommendations(self, df: pd.DataFrame, target_col: Optional[str] = None,
@@ -1162,7 +1203,7 @@ class MetaLearner:
             'timestamp': time.time()
         })
         
-        logger.info(f"Registrado resultado para dataset {dataset_idx}: score={score:.4f}")
+        self.logger.info(f"Registrado resultado para dataset {dataset_idx}: score={score:.4f}")
     
     def save(self, filepath: Optional[str] = None) -> None:
         """
@@ -1173,7 +1214,7 @@ class MetaLearner:
         """
         filepath = filepath or self.experience_db
         if not filepath:
-            logger.warning("Caminho de arquivo não especificado. Base de experiências não salva.")
+            self.logger.warning("Caminho de arquivo não especificado. Base de experiências não salva.")
             return
         
         data = {
@@ -1185,7 +1226,7 @@ class MetaLearner:
         with open(filepath, 'wb') as f:
             joblib.dump(data, f)
         
-        logger.info(f"Base de experiências salva em {filepath}")
+        self.logger.info(f"Base de experiências salva em {filepath}")
 
 
 class TransformationCombiner:
@@ -1209,7 +1250,19 @@ class TransformationCombiner:
         self.beam_width = beam_width
         self.parallel = parallel
         self.n_jobs = n_jobs
-        logger.info(f"TransformationCombiner inicializado com {len(self.base_transformations)} transformações base")
+        self._setup_logging()
+        self.logger.info(f"TransformationCombiner inicializado com {len(self.base_transformations)} transformações base")
+        self.logger.info("TransformationCombiner inicializado com sucesso.")
+
+    def _setup_logging(self):
+        self.logger = logging.getLogger("AutoFE.TransformationCombiner")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
+        
     
     def add_base_transformation(self, config: Dict) -> None:
         """
@@ -1220,7 +1273,7 @@ class TransformationCombiner:
         """
         if config not in self.base_transformations:
             self.base_transformations.append(config)
-            logger.info(f"Adicionada transformação base: {config}")
+            self.logger.info(f"Adicionada transformação base: {config}")
     
     def _combine_configs(self, config1: Dict, config2: Dict) -> Dict:
         """
@@ -1260,7 +1313,7 @@ class TransformationCombiner:
         
         # Verifica se há transformações disponíveis
         if not transformations:
-            logger.warning("Nenhuma transformação disponível para combinar")
+            self.logger.warning("Nenhuma transformação disponível para combinar")
             return []
         
         # Inicializa lista de combinações com as transformações base
@@ -1293,7 +1346,7 @@ class TransformationCombiner:
             random.shuffle(combinations)
             combinations = combinations[:limit]
         
-        logger.info(f"Geradas {len(combinations)} combinações de transformações")
+        self.logger.info(f"Geradas {len(combinations)} combinações de transformações")
         return combinations
     
     def beam_search(self, df: pd.DataFrame, target_col: Optional[str] = None,
@@ -1332,7 +1385,7 @@ class TransformationCombiner:
         frontier = ["root"]
         
         for level in range(1, self.max_depth + 1):
-            logger.info(f"Buscando no nível {level}...")
+            self.logger.info(f"Buscando no nível {level}...")
             level_nodes = []
             
             # Processa cada nó na fronteira atual
@@ -1370,11 +1423,11 @@ class TransformationCombiner:
                                     if result['data'] is not None:
                                         transformations_results.append(result)
                                 except Exception as e:
-                                    logger.error(f"Erro em worker: {e}")
+                                    self.logger.error(f"Erro em worker: {e}")
                     except Exception as e:
-                        logger.error(f"Erro ao configurar paralelização: {e}")
+                        self.logger.error(f"Erro ao configurar paralelização: {e}")
                         # Fallback para execução sequencial
-                        logger.info("Usando execução sequencial como fallback")
+                        self.logger.info("Usando execução sequencial como fallback")
                         for config in combinations:
                             result = process_transformation(config, parent_data.copy(), target_col, evaluator)
                             if result['data'] is not None:
@@ -1406,9 +1459,9 @@ class TransformationCombiner:
             if level_nodes:
                 level_nodes.sort(key=lambda x: x[1], reverse=True)
                 frontier = [node_id for node_id, _ in level_nodes[:self.beam_width]]
-                logger.info(f"Selecionados {len(frontier)} nós para prosseguir: {frontier}")
+                self.logger.info(f"Selecionados {len(frontier)} nós para prosseguir: {frontier}")
             else:
-                logger.warning(f"Nenhum nó válido encontrado no nível {level}. Parando a busca.")
+                self.logger.warning(f"Nenhum nó válido encontrado no nível {level}. Parando a busca.")
                 break
         
         # Poda a árvore para remover ramos de baixa qualidade
@@ -1465,8 +1518,17 @@ class Explorer:
         
         # Armazena o resultado da exploração
         self.exploration_result = None
-        
-        logger.info(f"Explorer inicializado. Target: {target_col}, Tipo: {problem_type}")
+        self._setup_logging()
+        self.logger.info(f"Explorer inicializado. Target: {target_col}, Tipo: {problem_type}")
+    
+    def _setup_logging(self):
+        self.logger = logging.getLogger("AutoFE.MetaLearner")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
     
     def _analyze_dataset(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Dict:
         """
@@ -1908,7 +1970,7 @@ class Explorer:
         Returns:
             Árvore de transformações
         """
-        logger.info(f"Iniciando exploração para DataFrame de dimensões {df.shape}")
+        self.logger.info(f"Iniciando exploração para DataFrame de dimensões {df.shape}")
         
         # Cria um perfil do dataset
         dataset_profile = self.meta_learner.profile_dataset(df, self.target_col)
@@ -1949,7 +2011,7 @@ class Explorer:
             if self.experience_db:
                 self.meta_learner.save()
         except Exception as e:
-            logger.warning(f"Erro ao registrar resultados no meta-learner: {e}")
+            self.logger.warning(f"Erro ao registrar resultados no meta-learner: {e}")
         
         return tree
     
@@ -1961,16 +2023,16 @@ class Explorer:
             Configuração da melhor transformação
         """
         if not self.exploration_result:
-            logger.warning("Nenhuma exploração realizada. Retornando configuração padrão.")
+            self.logger.warning("Nenhuma exploração realizada. Retornando configuração padrão.")
             return self.base_configs[0]
         
         best_nodes = self.exploration_result.get_best_nodes(limit=1)
         if not best_nodes:
-            logger.warning("Nenhum nó encontrado na exploração. Retornando configuração padrão.")
+            self.logger.warning("Nenhum nó encontrado na exploração. Retornando configuração padrão.")
             return self.base_configs[0]
         
         best_node = self.exploration_result.nodes[best_nodes[0]]
-        logger.info(f"Melhor transformação: {best_node.name} com score {best_node.score:.4f}")
+        self.logger.info(f"Melhor transformação: {best_node.name} com score {best_node.score:.4f}")
         
         return best_node.config
     
@@ -2099,12 +2161,12 @@ class Explorer:
             if output_file:
                 with open(output_file, 'w') as f:
                     f.write(dot_code)
-                logger.info(f"Visualização salva em {output_file}")
+                self.logger.info(f"Visualização salva em {output_file}")
             
             return dot_code
             
         except ImportError as e:
-            logger.warning(f"Erro ao gerar visualização: {e}")
+            self.logger.warning(f"Erro ao gerar visualização: {e}")
             return f"digraph {{ ROOT [label=\"Error: {e}\"] }}"
     
     def save(self, filepath: str) -> None:
@@ -2126,7 +2188,7 @@ class Explorer:
         with open(filepath, 'wb') as f:
             joblib.dump(data, f)
         
-        logger.info(f"Explorer salvo em {filepath}")
+        self.logger.info(f"Explorer salvo em {filepath}")
     
     @classmethod
     def load(cls, filepath: str, experience_db: Optional[str] = None) -> 'Explorer':
@@ -2154,7 +2216,7 @@ class Explorer:
         # Restaura resultado da exploração
         explorer.exploration_result = data.get('exploration_result')
         
-        logger.info(f"Explorer carregado de {filepath}")
+        self.logger.info(f"Explorer carregado de {filepath}")
         return explorer
 
 
