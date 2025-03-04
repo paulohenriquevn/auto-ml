@@ -852,18 +852,19 @@ class PreProcessor:
             # Retorna pesos iguais como fallback
             return np.ones(len(y))
     
-    def _balance_dataset(df: pd.DataFrame, target_col: str, 
-                        balance_method: str = 'smote', 
-                        sampling_strategy: Union[str, float, Dict] = 'auto',
-                        random_state: int = 42) -> pd.DataFrame:
+    def _balance_dataset(self, df: pd.DataFrame, target_col: str, 
+                    balance_method: str = 'smote', 
+                    sampling_strategy: Union[str, float, Dict] = 'auto',
+                    random_state: int = 42) -> pd.DataFrame:
         """
-        Equilibra um dataset usando várias técnicas para lidar com classes desbalanceadas.
+        Equilibra um dataset usando técnicas avançadas para lidar com classes desbalanceadas.
         
         Args:
             df: DataFrame com os dados
             target_col: Nome da coluna alvo
             balance_method: Método de balanceamento ('smote', 'adasyn', 'random_over',
-                        'random_under', 'tomek', 'nearmiss', 'smoteenn', 'smotetomek')
+                        'random_under', 'tomek', 'nearmiss', 'smoteenn', 'smotetomek',
+                        'borderline_smote', 'svm_smote', 'kmeans_smote')
             sampling_strategy: Estratégia de amostragem ('auto', float, ou dict)
             random_state: Semente aleatória para reprodutibilidade
         
@@ -887,14 +888,11 @@ class PreProcessor:
         
         if min_class_ratio >= 0.8:
             # Dataset já está relativamente balanceado (proporção mínima de 80%)
-            logging.info("Dataset já está razoavelmente balanceado. Mantendo dados originais.")
+            self.logger.info("Dataset já está razoavelmente balanceado. Mantendo dados originais.")
             return df
         
-        logging.info(f"Aplicando método de balanceamento: {balance_method}")
-        logging.info(f"Distribuição original de classes: {class_counts.to_dict()}")
-        
-        # Separar features e target
-        X = df.drop(columns=[target_col])
+        self.logger.info(f"Aplicando método de balanceamento: {balance_method}")
+        self.logger.info(f"Distribuição original de classes: {class_counts.to_dict()}")
         
         # Identificar colunas categóricas para codificação temporária
         cat_cols = X.select_dtypes(include=['object', 'category']).columns
@@ -911,14 +909,23 @@ class PreProcessor:
         
         try:
             # Import técnicas de balanceamento
-            if balance_method in ['smote', 'borderline', 'svm']:
+            if balance_method in ['smote', 'borderline_smote', 'svm_smote']:
                 from imblearn.over_sampling import SMOTE, BorderlineSMOTE, SVMSMOTE
                 if balance_method == 'smote':
                     sampler = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
-                elif balance_method == 'borderline':
-                    sampler = BorderlineSMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
-                elif balance_method == 'svm':
+                elif balance_method == 'borderline_smote':
+                    sampler = BorderlineSMOTE(sampling_strategy=sampling_strategy, random_state=random_state, kind='borderline-1')
+                elif balance_method == 'svm_smote':
                     sampler = SVMSMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+            
+            elif balance_method == 'kmeans_smote':
+                try:
+                    from imblearn.over_sampling import KMeansSMOTE
+                    sampler = KMeansSMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+                except ImportError:
+                    self.logger.warning("KMeansSMOTE não disponível. Usando SMOTE padrão.")
+                    from imblearn.over_sampling import SMOTE
+                    sampler = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
             
             elif balance_method == 'adasyn':
                 from imblearn.over_sampling import ADASYN
@@ -948,11 +955,57 @@ class PreProcessor:
                 from imblearn.combine import SMOTETomek
                 sampler = SMOTETomek(sampling_strategy=sampling_strategy, random_state=random_state)
             
+            # Abordagem híbrida:
+            elif balance_method == 'hybrid_mix':
+                # Combina oversampling moderado e undersampling seletivo
+                from imblearn.over_sampling import SMOTE
+                from imblearn.under_sampling import NearMiss
+                
+                # Primeiro aplicamos SMOTE para aumentar a classe minoritária mas não completamente
+                smote_ratio = min(0.5, class_counts.min() / class_counts.max() * 5)  # Aumenta até 5x ou 50% da majoritária
+                smote_sampler = SMOTE(sampling_strategy=smote_ratio, random_state=random_state)
+                X_temp, y_temp = smote_sampler.fit_resample(X_encoded, y)
+                
+                # Depois aplicamos NearMiss para reduzir a classe majoritária de forma seletiva
+                nearmiss_sampler = NearMiss(sampling_strategy=0.7)  # Remove 30% da classe majoritária
+                X_resampled, y_resampled = nearmiss_sampler.fit_resample(X_temp, y_temp)
+                
+                # Não precisamos chamar fit_resample abaixo
+                already_resampled = True
+            
+            elif balance_method == 'self_paced':
+                # Implementação de balanceamento auto-adaptativo
+                # Aumenta classes minoritárias proporcionalmente ao seu tamanho
+                from imblearn.over_sampling import SMOTE, RandomOverSampler
+                
+                # Identifica todas as classes e calcula uma estratégia personalizada
+                classes = np.unique(y)
+                max_count = class_counts.max()
+                
+                # Define estratégia - classes menores recebem mais oversampling
+                strategy = {}
+                for cls in classes:
+                    count = class_counts[cls]
+                    if count < max_count * 0.5:  # Para classes realmente minoritárias
+                        # Ajuste quadrático - classes muito pequenas crescem mais
+                        ratio = 1 - (count / max_count) ** 0.5  # 0 = majoritária, próximo de 1 = muito minoritária
+                        target_count = int(count + (max_count * ratio * 0.8))  # No máximo 80% da majoritária
+                        strategy[cls] = min(target_count, max_count - 1)  # Nunca ultrapassa a majoritária
+                
+                # Se apenas uma classe é minoritária, simplifica a abordagem
+                if len(strategy) == 1:
+                    strategy = list(strategy.values())[0] / max_count
+                    sampler = SMOTE(sampling_strategy=strategy, random_state=random_state)
+                else:
+                    # Usa o dicionário completo para múltiplas classes minoritárias
+                    sampler = SMOTE(sampling_strategy=strategy, random_state=random_state)
+            
             else:
                 raise ValueError(f"Método de balanceamento '{balance_method}' não reconhecido")
             
             # Aplicar técnica de balanceamento
-            X_resampled, y_resampled = sampler.fit_resample(X_encoded, y)
+            if not locals().get('already_resampled', False):
+                X_resampled, y_resampled = sampler.fit_resample(X_encoded, y)
             
             # Restaurar codificação original das variáveis categóricas
             if len(cat_cols) > 0:
@@ -965,25 +1018,25 @@ class PreProcessor:
             
             # Relatar resultados
             new_class_counts = balanced_df[target_col].value_counts()
-            logging.info(f"Distribuição de classes após balanceamento: {new_class_counts.to_dict()}")
-            logging.info(f"Balanceamento alterou o tamanho do dataset: {len(df)} → {len(balanced_df)}")
+            self.logger.info(f"Distribuição de classes após balanceamento: {new_class_counts.to_dict()}")
+            self.logger.info(f"Balanceamento alterou o tamanho do dataset: {len(df)} → {len(balanced_df)}")
             
             return balanced_df
         
         except ImportError as e:
-            logging.warning(f"Erro ao importar bibliotecas para balanceamento: {e}. Instalando imbalanced-learn...")
+            self.logger.warning(f"Erro ao importar bibliotecas para balanceamento: {e}. Instalando imbalanced-learn...")
             try:
                 import pip
                 pip.main(['install', 'imbalanced-learn'])
-                logging.info("imbalanced-learn instalado. Tente executar novamente.")
+                self.logger.info("imbalanced-learn instalado. Tente executar novamente.")
             except:
-                logging.error("Falha ao instalar imbalanced-learn. Mantendo dados originais.")
+                self.logger.error("Falha ao instalar imbalanced-learn. Mantendo dados originais.")
             return df
         
         except Exception as e:
-            logging.error(f"Erro ao aplicar balanceamento: {e}. Mantendo dados originais.")
+            self.logger.error(f"Erro ao aplicar balanceamento: {e}. Mantendo dados originais.")
             return df
-
+        
     def get_sample_weights(self) -> Optional[np.ndarray]:
         """Retorna os pesos das amostras para classes desbalanceadas."""
         return self.sample_weights

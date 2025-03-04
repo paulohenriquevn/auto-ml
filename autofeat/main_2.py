@@ -225,7 +225,7 @@ if __name__ == "__main__":
     logger.info("Iniciando testes do AutoFE Melhorado...")
     
     # Teste do Explorer melhorado com Iris
-    # acc_iris, iris_explorer = test_classification_iris()
+    acc_iris, iris_explorer = test_classification_iris()
     
     # Executa os outros testes
     try:
@@ -234,17 +234,17 @@ if __name__ == "__main__":
         logger.error(f"Erro no teste de fraude: {e}")
         auc_fraud, f1_fraud = None, None
     
-    # try:
-    #     # Use modo sequencial para o dataset de doenças cardíacas para evitar problemas
-    #     auc_heart, f1_heart = test_heart_disease_classification()
-    # except Exception as e:
-    #     logger.error(f"Erro no teste de doenças cardíacas: {e}")
-    #     auc_heart, f1_heart = None, None
+    try:
+        # Use modo sequencial para o dataset de doenças cardíacas para evitar problemas
+        auc_heart, f1_heart = test_heart_disease_classification()
+    except Exception as e:
+        logger.error(f"Erro no teste de doenças cardíacas: {e}")
+        auc_heart, f1_heart = None, None
     
     # Resumo de todos os testes
     logger.info("\n=== Resumo dos Testes com Explorer Melhorado ===")
-   # logger.info(f"Acurácia - Iris: {acc_iris:.4f}")
+    logger.info(f"Acurácia - Iris: {acc_iris:.4f}")
     if auc_fraud is not None:
         logger.info(f"AUC-ROC - Fraude: {auc_fraud:.4f}, F1-Score: {f1_fraud:.4f}")
-    # if auc_heart is not None:
-    #     logger.info(f"AUC-ROC - Doenças Cardíacas: {auc_heart:.4f}, F1-Score: {f1_heart:.4f}")f
+    if auc_heart is not None:
+        logger.info(f"AUC-ROC - Doenças Cardíacas: {auc_heart:.4f}, F1-Score: {f1_heart:.4f}")
