@@ -2,8 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 import networkx as nx
-from typing import List, Dict, Callable
-from typing import Dict, Optional
+from typing import List, Dict, Callable, Optional
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, OrdinalEncoder, PolynomialFeatures
 from sklearn.decomposition import PCA
@@ -56,176 +55,268 @@ class PreProcessor:
         return {'numeric': numeric_cols, 'categorical': categorical_cols}
     
     def _remove_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
-        method = self.config['outlier_method']
         if df.empty:
             self.logger.warning("DataFrame vazio antes da remoção de outliers. Pulando esta etapa.")
-            return df  # Retorna o DataFrame sem modificação
-
-        if method == 'zscore':
-            filtered_df = df[(np.abs(stats.zscore(df.select_dtypes(include=['number']))) < 3).all(axis=1)]
-        elif method == 'iqr':
-            Q1 = df.quantile(0.25)
-            Q3 = df.quantile(0.75)
-            IQR = Q3 - Q1
-            filtered_df = df[~((df < (Q1 - 1.5 * IQR)) | (df > (Q3 + 1.5 * IQR))).any(axis=1)]
+            return df
             
+        # Seleciona apenas colunas numéricas para tratamento de outliers
+        numeric_df = df.select_dtypes(include=['number'])
+        if numeric_df.empty:
+            return df
+            
+        method = self.config['outlier_method']
+        if method == 'zscore':
+            z_scores = np.abs(stats.zscore(numeric_df, nan_policy='omit'))
+            mask = (z_scores < 3).all(axis=1)
+            filtered_df = df[mask]
+        elif method == 'iqr':
+            Q1 = numeric_df.quantile(0.25)
+            Q3 = numeric_df.quantile(0.75)
+            IQR = Q3 - Q1
+            mask = ~((numeric_df < (Q1 - 1.5 * IQR)) | (numeric_df > (Q3 + 1.5 * IQR))).any(axis=1)
+            filtered_df = df[mask]
         elif method == 'isolation_forest':
             clf = IsolationForest(contamination=0.05, random_state=42)
-            outliers = clf.fit_predict(df.select_dtypes(include=['number']))
+            outliers = clf.fit_predict(numeric_df)
             filtered_df = df[outliers == 1]
         else:
             return df  # Caso o método não seja reconhecido, retorna o DataFrame original
 
         if filtered_df.empty:
             self.logger.warning("Todas as amostras foram removidas na remoção de outliers! Retornando DataFrame original.")
-            return df  # Retorna o DataFrame original caso a remoção tenha eliminado tudo
+            return df
 
         return filtered_df
 
-    def _remove_high_correlation(self, df):
-        corr_matrix = df.corr().abs()
-        upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        to_drop = [column for column in upper_triangle.columns if any(upper_triangle[column] > self.config['correlation_threshold'])]
-        return df.drop(columns=to_drop, errors='ignore')
+    def _remove_high_correlation(self, df: pd.DataFrame) -> pd.DataFrame:
+        numeric_df = df.select_dtypes(include=['number'])
+        if numeric_df.empty:
+            return df
+            
+        try:
+            corr_matrix = numeric_df.corr().abs()
+            upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+            to_drop = [column for column in upper_triangle.columns if any(upper_triangle[column] > self.config['correlation_threshold'])]
+            
+            if to_drop:
+                self.logger.info(f"Removendo {len(to_drop)} colunas altamente correlacionadas: {to_drop[:5]}...")
+                return df.drop(columns=to_drop, errors='ignore')
+            return df
+        except Exception as e:
+            self.logger.warning(f"Erro ao calcular correlações: {e}. Retornando DataFrame original.")
+            return df
     
     def _generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         if not self.config['generate_features']:
             return df
 
         num_data = df.select_dtypes(include=['number'])
-
         if num_data.empty:
             self.logger.warning("Nenhuma feature numérica encontrada. Pulando geração de features polinomiais.")
-            return df  # Retorna o DataFrame sem alteração
+            return df
 
-        poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
         try:
+            poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
             new_features = poly.fit_transform(num_data)
-            new_feature_names = [f"feature_{i}" for i in range(new_features.shape[1])]
-            df_poly = pd.DataFrame(new_features, columns=new_feature_names, index=df.index)
+            
+            # Gera nomes de features mais descritivos
+            feature_names = poly.get_feature_names_out(num_data.columns)
+            
+            # Remove colunas originais dos nomes das features transformadas
+            poly_feature_names = [name for name in feature_names 
+                                 if ' ' in name]  # Features interativas contêm espaço
+            
+            # Cria DataFrame apenas com as novas features
+            df_poly = pd.DataFrame(
+                new_features[:, len(num_data.columns):],
+                columns=poly_feature_names,
+                index=df.index
+            )
+            
+            self.logger.info(f"Geradas {len(poly_feature_names)} novas features polinomiais")
             return pd.concat([df, df_poly], axis=1)
         except Exception as e:
             self.logger.error(f"Erro ao gerar features polinomiais: {e}")
-            return df  # Retorna o DataFrame sem alterações se houver erro
-
+            return df
     
     def fit(self, df: pd.DataFrame, target_col: Optional[str] = None) -> 'PreProcessor':
-        if target_col and target_col in df.columns:
-            df = df.drop(columns=[target_col])
-        else:
-            self.logger.warning(f"Coluna '{target_col}' não encontrada no DataFrame. Nenhuma remoção foi feita.")
-        
-        df = self._remove_outliers(df)
-        df = self._generate_features(df)
-        df = self._remove_high_correlation(df)
-
         if df.empty:
-            self.logger.error("Erro: O DataFrame está vazio após pré-processamento. Ajuste as configurações de transformação.")
+            raise ValueError("Não é possível ajustar com um DataFrame vazio")
+            
+        self.target_col = target_col
+        df_proc = df.copy()
+        
+        # Remover coluna alvo se presente
+        if target_col and target_col in df_proc.columns:
+            df_proc = df_proc.drop(columns=[target_col])
+            self.logger.info(f"Coluna alvo '{target_col}' removida para processamento")
+        
+        # Aplicar transformações
+        df_proc = self._remove_outliers(df_proc)
+        df_proc = self._generate_features(df_proc)
+        df_proc = self._remove_high_correlation(df_proc)
+
+        if df_proc.empty:
+            self.logger.error("Erro: O DataFrame está vazio após pré-processamento. Ajuste as configurações.")
             raise ValueError("O DataFrame está vazio após as transformações.")
 
-        self.column_types = self._identify_column_types(df)
+        self.column_types = self._identify_column_types(df_proc)
+        self.logger.info(f"Colunas identificadas: {len(self.column_types['numeric'])} numéricas, {len(self.column_types['categorical'])} categóricas")
 
-        imputer = KNNImputer() if self.config['missing_values_strategy'] == 'knn' else SimpleImputer(strategy=self.config['missing_values_strategy'])
+        # Configurar pipeline de transformação
+        transformers = self._build_transformers()
+        self.preprocessor = ColumnTransformer(transformers, remainder='passthrough')
+
+        # Configurar redução de dimensionalidade, se aplicável
+        self._setup_dimensionality_reduction(df_proc)
         
-        scalers = {'standard': StandardScaler(), 'minmax': MinMaxScaler(), 'robust': RobustScaler()}
+        try:
+            self.preprocessor.fit(df_proc)
+            self.feature_names = df_proc.columns.tolist()
+            self.fitted = True
+            self.logger.info(f"Preprocessador ajustado com sucesso com {len(self.feature_names)} features")
+            return self
+        except Exception as e:
+            self.logger.error(f"Erro ao ajustar o preprocessador: {e}")
+            raise
+
+    def _build_transformers(self) -> List:
+        """Constrói os transformadores para colunas numéricas e categóricas"""
+        # Configurar imputer
+        if self.config['missing_values_strategy'] == 'knn':
+            num_imputer = KNNImputer()
+        else:
+            num_imputer = SimpleImputer(strategy=self.config['missing_values_strategy'])
+        
+        # Configurar scaler
+        scalers = {
+            'standard': StandardScaler(), 
+            'minmax': MinMaxScaler(), 
+            'robust': RobustScaler()
+        }
         scaler = scalers.get(self.config['scaling'], 'passthrough')
 
+        # Pipeline para features numéricas
         numeric_transformer = Pipeline([
-            ('imputer', imputer),
+            ('imputer', num_imputer),
             ('scaler', scaler)
         ])
 
+        # Pipeline para features categóricas
+        categorical_encoder = (
+            OneHotEncoder(handle_unknown='ignore', sparse_output=False) 
+            if self.config['categorical_strategy'] == 'onehot' 
+            else OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+        )
+        
         categorical_transformer = Pipeline([
             ('imputer', SimpleImputer(strategy='most_frequent')),
-            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False) if self.config['categorical_strategy'] == 'onehot' else OrdinalEncoder())
+            ('encoder', categorical_encoder)
         ])
 
+        # Montar transformers
         transformers = []
         if self.column_types['numeric']:
             transformers.append(('num', numeric_transformer, self.column_types['numeric']))
         if self.column_types['categorical']:
             transformers.append(('cat', categorical_transformer, self.column_types['categorical']))
-        
-        self.preprocessor = ColumnTransformer(transformers, remainder='passthrough')
+            
+        return transformers
 
-        # Ajuste no PCA para evitar erro de número de componentes
+    def _setup_dimensionality_reduction(self, df: pd.DataFrame) -> None:
+        """Configura redução de dimensionalidade e seleção de features"""
+        pipeline_steps = [('preprocessor', self.preprocessor)]
+        
+        # Adicionar PCA se configurado
         if self.config['dimensionality_reduction'] == 'pca':
-            n_components = min(10, df.shape[1])  # Garante que n_components não seja maior que o número de colunas
+            n_components = min(self.config['min_pca_components'], df.shape[1])
             if n_components > 1:
-                pca = PCA(n_components=n_components)
-                self.preprocessor = Pipeline([
-                    ('preprocessor', self.preprocessor),
-                    ('pca', pca)
-                ])
+                pipeline_steps.append(('pca', PCA(n_components=n_components)))
+                self.logger.info(f"PCA configurado com {n_components} componentes")
             else:
                 self.logger.warning("Número de features insuficiente para aplicar PCA. PCA será ignorado.")
 
+        # Adicionar seleção de features se configurado
         if self.config['feature_selection'] == 'variance':
-            self.preprocessor = Pipeline([
-                ('preprocessor', self.preprocessor),
-                ('feature_selection', VarianceThreshold(threshold=0.01))
-            ])
-        
-        try:
-            self.preprocessor.fit(df)
-            self.feature_names = df.columns[df.columns.isin(df.columns)].tolist()  # Apenas colunas sobreviventes  # Armazena os nomes das colunas pós-fit
-        except ValueError as e:
-            self.logger.error(f"Erro ao ajustar o preprocessador: {e}")
-            raise
-
-        self.fitted = True
-        return self
-
+            pipeline_steps.append(('feature_selection', VarianceThreshold(threshold=0.01)))
+            
+        # Construir pipeline final
+        if len(pipeline_steps) > 1:
+            self.preprocessor = Pipeline(pipeline_steps)
 
     def transform(self, df: pd.DataFrame, target_col: Optional[str] = None) -> pd.DataFrame:
         if not self.fitted:
             raise ValueError("O preprocessador precisa ser ajustado antes de transformar dados. Use .fit() primeiro.")
 
-        if target_col and target_col in df.columns:
-            target_data = df[target_col]
-            df = df.drop(columns=[target_col])
-        else:
-            target_data = None
+        df_proc = df.copy()
+        target_data = None
+        
+        # Separar target se presente
+        if target_col and target_col in df_proc.columns:
+            target_data = df_proc[target_col].copy()
+            df_proc = df_proc.drop(columns=[target_col])
+        
+        # Aplicar transformações
+        df_proc = self._remove_outliers(df_proc)
+        df_proc = self._generate_features(df_proc)
+        df_proc = self._remove_high_correlation(df_proc)
 
-        df = self._remove_outliers(df)
-        df = self._generate_features(df)
-        df = self._remove_high_correlation(df)
+        # Verificar e ajustar colunas para compatibilidade com o modelo de preprocessamento
+        self._check_columns_compatibility(df_proc)
+        
+        # Aplicar transformação
+        try:
+            df_transformed = self.preprocessor.transform(df_proc)
+            
+            # Determinar nomes das colunas
+            if hasattr(self.preprocessor, 'get_feature_names_out'):
+                feature_names = self.preprocessor.get_feature_names_out()
+            else:
+                feature_names = [f"feature_{i}" for i in range(df_transformed.shape[1])]
 
+            # Criar DataFrame com os dados transformados
+            result_df = pd.DataFrame(
+                df_transformed, 
+                index=df_proc.index, 
+                columns=feature_names
+            )
+            
+            # Adicionar coluna target se existir
+            if target_data is not None:
+                result_df[target_col] = target_data.loc[result_df.index]
+                
+            return result_df
+            
+        except Exception as e:
+            self.logger.error(f"Erro na transformação dos dados: {e}")
+            raise
+
+    def _check_columns_compatibility(self, df: pd.DataFrame) -> None:
+        """Verifica e ajusta as colunas para compatibilidade com o modelo ajustado"""
+        # Verificar colunas ausentes
         missing_cols = set(self.feature_names) - set(df.columns)
         if missing_cols:
-            self.logger.warning(f"Colunas ausentes na transformação: {missing_cols}. Ajustando DataFrame.")
+            self.logger.warning(f"Colunas ausentes na transformação: {missing_cols}. Adicionando com zeros.")
             for col in missing_cols:
                 df[col] = 0
-
-        df = df.loc[:, df.columns.isin(self.feature_names)]
-        
-        # **Correção aqui: capturando as colunas resultantes da transformação**
-        df_transformed = self.preprocessor.transform(df)
-        
-        # Se PCA ou feature selection reduziram as colunas, pegar os nomes dinamicamente
-        if hasattr(self.preprocessor, 'get_feature_names_out'):
-            feature_names = self.preprocessor.get_feature_names_out()
-        else:
-            feature_names = [f"feature_{i}" for i in range(df_transformed.shape[1])]
-
-        df_transformed = pd.DataFrame(df_transformed, index=df.index, columns=feature_names)
-
-        if target_data is not None:
-            target_data = target_data.loc[df_transformed.index]  # Filtrar target para manter só as amostras existentes
-            df_transformed[target_col] = target_data.values
-
-        return df_transformed
-
-    
+                
+        # Manter apenas colunas conhecidas pelo modelo
+        extra_cols = set(df.columns) - set(self.feature_names)
+        if extra_cols:
+            self.logger.warning(f"Colunas extras ignoradas: {extra_cols}")
+            
     def save(self, filepath: str) -> None:
         if not self.fitted:
             raise ValueError("Não é possível salvar um preprocessador não ajustado.")
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         joblib.dump(self, filepath)
+        self.logger.info(f"Preprocessador salvo em {filepath}")
     
     @classmethod
     def load(cls, filepath: str) -> 'PreProcessor':
-        return joblib.load(filepath)
+        preprocessor = joblib.load(filepath)
+        preprocessor.logger.info(f"Preprocessador carregado de {filepath}")
+        return preprocessor
     
     
 

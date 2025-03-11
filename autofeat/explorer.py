@@ -15,6 +15,7 @@ import concurrent.futures
 import joblib
 import os
 from config import IMBALANCED_CONFIGS
+from robust_cross_validation import RobustCrossValidator, create_validator
 
 # Configuração do logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -462,8 +463,6 @@ class TransformationTree:
         tree = TransformationTree()
         tree.graph = data['graph']
         tree.nodes = data['nodes']
-        
-        self.logger.info(f"Árvore de transformações carregada de {filepath}")
         return tree
 
 
@@ -472,7 +471,7 @@ class TransformationEvaluator:
     Avalia transformações aplicadas a um conjunto de dados.
     """
     def __init__(self, target_col: Optional[str] = None, problem_type: str = 'auto',
-                 cv_folds: int = 5, random_state: int = 42):
+                 cv_folds: int = 5, random_state: int = 42, use_robust_cv: bool = True):
         """
         Inicializa o avaliador de transformações.
         
@@ -481,16 +480,28 @@ class TransformationEvaluator:
             problem_type: Tipo de problema ('classification', 'regression', ou 'auto')
             cv_folds: Número de folds para validação cruzada
             random_state: Semente aleatória para reprodutibilidade
+            use_robust_cv: Se deve usar validação cruzada robusta
         """
         self.target_col = target_col
         self.problem_type = problem_type
         self.cv_folds = cv_folds
         self.random_state = random_state
         self.metrics = {}
+        
+        # Inicializa o validador robusto se necessário
+        if use_robust_cv:
+            self.validator = create_validator(
+                problem_type=problem_type,
+                n_splits=cv_folds,
+                random_state=random_state,
+                verbosity=1
+            )
+            
         self._setup_logging()
         self.logger.info("TransformationEvaluator inicializado com sucesso.")
 
     def _setup_logging(self):
+        """Configura o logger para a classe."""
         self.logger = logging.getLogger("AutoFE.TransformationEvaluator")
         if not self.logger.handlers:
             handler = logging.StreamHandler()
@@ -805,6 +816,55 @@ class TransformationEvaluator:
             return sum(score_components)
         else:
             return 0.0  # Nenhuma métrica disponível
+            
+    def evaluate_with_robust_cv(self, df: pd.DataFrame, model, prefix: str = "") -> Dict[str, float]:
+        """
+        Avalia usando validação cruzada robusta.
+        
+        Args:
+            df: DataFrame com dados
+            model: Modelo a ser avaliado
+            prefix: Prefixo para nomes das métricas
+            
+        Returns:
+            Dicionário com métricas calculadas
+        """
+        if not hasattr(self, 'validator') or not self.target_col or self.target_col not in df.columns:
+            # Fallback para avaliação padrão
+            return self.evaluate_transformation(df, prefix)
+        
+        metrics = {}
+        
+        # Métricas básicas
+        X = df.drop(columns=[self.target_col])
+        y = df[self.target_col]
+        
+        metrics[f'{prefix}dimensionality'] = X.shape[1]
+        metrics[f'{prefix}missing_ratio'] = X.isna().mean().mean()
+        
+        try:
+            # Usa o RobustCrossValidator para uma avaliação mais confiável
+            cv_results = self.validator.cross_validate(model, X, y, return_train_score=True)
+            
+            # Adiciona métricas da validação robusta
+            for key, value in cv_results.items():
+                if key.endswith('_mean'):
+                    metrics[f'{prefix}robust_{key}'] = value
+            
+            # Adiciona score de confiabilidade
+            if 'reliability_score' in cv_results:
+                metrics[f'{prefix}reliability'] = cv_results['reliability_score']
+            
+            # Adiciona grau de overfitting se disponível
+            if 'overfitting_grade' in cv_results:
+                metrics[f'{prefix}overfitting_grade'] = cv_results['overfitting_grade']
+                
+        except Exception as e:
+            self.logger.warning(f"Erro ao usar validação cruzada robusta: {e}")
+            # Fallback para avaliação padrão
+            return self.evaluate_transformation(df, prefix)
+            
+        return metrics
 
 
 class MetaLearner:
@@ -2215,8 +2275,6 @@ class Explorer:
         
         # Restaura resultado da exploração
         explorer.exploration_result = data.get('exploration_result')
-        
-        self.logger.info(f"Explorer carregado de {filepath}")
         return explorer
 
 

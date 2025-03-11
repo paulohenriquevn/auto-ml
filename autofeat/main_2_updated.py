@@ -294,9 +294,6 @@ def test_fraud_classification():
 
     target_col = 'Class'
     
-    # Aplicando melhor estratégia de balanceamento
-    df = apply_best_balance_strategy(df, target_col)
-    
     # Explorador atualizado
     explorador = Explorer(
         target_col=target_col,

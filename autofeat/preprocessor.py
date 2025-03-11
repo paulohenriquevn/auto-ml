@@ -821,7 +821,7 @@ class PreProcessor:
             self.logger.error(f"Erro na redução de dimensionalidade: {e}")
             return df  # Retorna o DataFrame sem alterações se houver erro
     
-    def _compute_sample_weights(y: pd.Series) -> np.ndarray:
+    def _compute_sample_weights(self, y):
         """
         Calcula pesos de amostra para lidar com classes desbalanceadas.
         
@@ -832,6 +832,9 @@ class PreProcessor:
             Array com pesos para cada amostra
         """
         try:
+            # Importa a função necessária
+            from sklearn.utils.class_weight import compute_class_weight
+            
             # Calcula pesos de classe para balancear
             classes = np.unique(y)
             weights = compute_class_weight(class_weight='balanced', classes=classes, y=y)
@@ -845,7 +848,7 @@ class PreProcessor:
             return sample_weights
         
         except Exception as e:
-            logging.error(f"Erro ao calcular pesos de amostra: {e}")
+            self.logger.error(f"Erro ao calcular pesos de amostra: {e}")
             # Retorna pesos iguais como fallback
             return np.ones(len(y))
     
@@ -1119,7 +1122,7 @@ class PreProcessor:
                 
         # 7 Calcular pesos de amostra se necessário
         if self.config.get('use_sample_weights', False) and target_data is not None:
-            self.sample_weights = self._compute_sample_weights(target_data, target_col)
+            self.sample_weights = self._compute_sample_weights(target_data)
     
         # 8. Atualiza lista de tipos de colunas após transformações
         self.column_types = self._identify_column_types(df_copy)
